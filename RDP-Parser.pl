@@ -7,8 +7,8 @@
 # GitHub		  : https://github.com/arioux/rdp-parser
 # Description : RDP-Parser extracts RDP activities from Microsoft Windows Event Logs
 # Creation    : 2018-08-09
-# Modified    : 2018-09-19
-my $VERSION   = "1.0";
+# Modified    : 2018-12-09
+my $VERSION   = "1.1";
 # Author      : Alain Rioux (admin@le-tools.com)
 #
 # Copyright (C) 2018  Alain Rioux (le-tools.com)
@@ -85,13 +85,14 @@ if ($HELP) {
 			$menu .= "usage: RDP-Parser [options]\n";
 			$menu .= "Options and arguments:\n";
 			$menu .= "--p\t: Path: default is current or ".'C:\Windows\System32\winevt\Logs'."\n";
-			$menu .= "--t\t: Type: 1: minimal (default, event with IP addresses only, less event details)\n";
+			$menu .= "--t\t: Type:\n";
+			$menu .= "\t  1: minimal (default, event with public IP addresses only, less event details)\n";
 			$menu .= "\t  2: minimal with all IP addresses\n";
-			$menu .= "\t  3: normal (event with IP addresses only)\n";
+			$menu .= "\t  3: normal (event with public IP addresses only)\n";
 			$menu .= "\t  4: normal with all IP addresses\n";
 			$menu .= "\t  5: full (all RDP and login events)\n";
-			$menu .= "--s\t: Date start: [format: yyyy-mm-dd]\n";
-			$menu .= "--e\t: Date end: [format: yyyy-mm-dd]\n";
+			$menu .= "--s\t: Date start [format: yyyy-mm-dd]\n";
+			$menu .= "--e\t: Date end [format: yyyy-mm-dd]\n";
 			$menu .= "--r\t: Report format: 1: xlsx (default), 2: text, 3: html\n";
 			$menu .= "--l\t: Data strings on a single line\n";
 			$menu .= "--o\t: Open report at the end\n";
@@ -147,12 +148,12 @@ if ($HELP) {
 	print "\nRDP-Parser $VERSION\n";
 	print "***********************************************************************\n";
 	foreach (@ARGV) { print "Warning: $_ is not a valid option. Do you mean -$_?" if (/^\-[^-]/); }
-	my ($elSecFile, $elTSLocalFile, $elTSRemoteFile, $elSysFile);
+	my ($elSecFile, $elTSLocalFile, $elTSRemoteFile, $elRDPCoreFile, $elSysFile);
 	# Verify path: specified path, current if there are evtx or C:\Windows\System32\winevt\Logs if access allowed
 	if ($LOG_PATH eq 'current') {
 		$LOG_PATH = $PROGDIR;
-		($elSecFile, $elTSLocalFile, $elTSRemoteFile, $elSysFile) = &listEventLogs($LOG_PATH);
-		if (!$elSecFile and !$elTSLocalFile and !$elTSRemoteFile and !$elSysFile) {
+		($elSecFile, $elTSLocalFile, $elTSRemoteFile, $elRDPCoreFile, $elSysFile) = &listEventLogs($LOG_PATH);
+		if (!$elSecFile and !$elTSLocalFile and !$elTSRemoteFile and !$elRDPCoreFile and !$elSysFile) {
 			my $answer;
 			if (!$AS_ADMIN) {
 				print "No log found in current directory and no path specified. Do you want to\n" .
@@ -193,9 +194,9 @@ if ($HELP) {
 	}
 	# List Event logs in directory
 	if (-d $LOG_PATH) {
-		if (!$elSecFile and !$elTSLocalFile and !$elTSRemoteFile and !$elSysFile) {
-			($elSecFile, $elTSLocalFile, $elTSRemoteFile, $elSysFile) = &listEventLogs($LOG_PATH);
-			if (!$elSecFile and !$elTSLocalFile and !$elTSRemoteFile and !$elSysFile) {
+		if (!$elSecFile and !$elTSLocalFile and !$elTSRemoteFile and $elRDPCoreFile and !$elSysFile) {
+			($elSecFile, $elTSLocalFile, $elTSRemoteFile, $elRDPCoreFile, $elSysFile) = &listEventLogs($LOG_PATH);
+			if (!$elSecFile and !$elTSLocalFile and !$elTSRemoteFile and !$elRDPCoreFile and !$elSysFile) {
 				print "No Event logs in the given path or access to path is disallowed (use --h)\n";
 				exit(0);
 			}
@@ -240,6 +241,7 @@ if ($HELP) {
 	#		$elSecFile (Security.evtx)
 	# 	$elTSLocalFile (Microsoft-Windows-TerminalServices-LocalSessionManager%4Operational.evtx)
 	# 	$elTSRemoteFile (Microsoft-Windows-TerminalServices-RemoteConnectionManager%4Operational.evtx)
+	#		$elRDPCoreFile (Microsoft-Windows-RemoteDesktopServices-RdpCoreTS%4Operational.evtx)
 	# 	$elSysFile (System.evtx)
 	my %Events;
 	# Events:
@@ -261,7 +263,8 @@ if ($HELP) {
 		$nbrActivities += &parseEventLog(1, $elSecFile			, \%Events)	if $elSecFile;
 		$nbrActivities += &parseEventLog(2, $elTSLocalFile	, \%Events)	if $elTSLocalFile;
 		$nbrActivities += &parseEventLog(3, $elTSRemoteFile	, \%Events)	if $elTSRemoteFile;
-		$nbrActivities += &parseEventLog(4, $elSysFile			, \%Events)	if $elSysFile;
+		$nbrActivities += &parseEventLog(4, $elRDPCoreFile	, \%Events)	if $elRDPCoreFile;
+		$nbrActivities += &parseEventLog(5, $elSysFile			, \%Events)	if $elSysFile;
 	}	
 	# Produce report
 	if ($nbrActivities) {
@@ -289,7 +292,7 @@ sub listEventLogs
 #--------------------------#
 {
 	my $path = shift;
-	my ($elSecFile, $elTSLocalFile, $elTSRemoteFile, $elSysFile) = undef;
+	my ($elSecFile, $elTSLocalFile, $elTSRemoteFile, $elRDPCoreFile, $elSysFile) = undef;
 	if (opendir(DIR,"$path\\")) {
 		print "Listing Event Logs in $path...\n";
 		while (my $file = readdir(DIR)) {
@@ -303,6 +306,9 @@ sub listEventLogs
 			} elsif ($file eq 'Microsoft-Windows-TerminalServices-RemoteConnectionManager%4Operational.evtx') {
 				$elTSRemoteFile = $filePath;
 				print "Microsoft-Windows-TerminalServices-RemoteConnectionManager%4Operational found.\n";
+			} elsif ($file eq 'Microsoft-Windows-RemoteDesktopServices-RdpCoreTS%4Operational.evtx') {
+				$elRDPCoreFile = $filePath;
+				print "Microsoft-Windows-RemoteDesktopServices-RdpCoreTS%4Operational.evtx found.\n";
 			} elsif ($file eq 'System.evtx') {
 				$elSysFile = $filePath;
 				print "System.evtx found.\n";
@@ -317,7 +323,7 @@ sub listEventLogs
 		closedir(DIR);
 		print "\n";
 	}
-	return($elSecFile, $elTSLocalFile, $elTSRemoteFile, $elSysFile);
+	return($elSecFile, $elTSLocalFile, $elTSRemoteFile, $elRDPCoreFile, $elSysFile);
 	
 }   #--- End listEventLogs
 
@@ -330,7 +336,8 @@ sub parseEventLog
 	# Elog: 1 = Security.evtx,
 	#				2 = Microsoft-Windows-TerminalServices-LocalSessionManager%4Operational.evtx,
 	#				3 = Microsoft-Windows-TerminalServices-RemoteConnectionManager%4Operational.evtx,
-	#				4 = System.evtx
+	#				4 = Microsoft-Windows-RemoteDesktopServices-RdpCoreTS%4Operational.evtx,
+	#				5 = System.evtx
 	my %eventIDs;
 	$eventIDs{21} 	= 'Remote Desktop Services: Session logon succeeded';
 	$eventIDs{22} 	= 'Remote Desktop Services: Shell start notification received';
@@ -340,6 +347,8 @@ sub parseEventLog
 	$eventIDs{39} 	= 'Session <X> has been disconnected by session <Y>';
 	$eventIDs{40} 	= 'Session <X> has been disconnected, reason code <Z>';
 	$eventIDs{56} 	= 'The Terminal Server security layer detected an error in the protocol stream and has disconnected the client.';
+	$eventIDs{131} 	= 'Remote Desktop Services: An account failed to log on';
+	$eventIDs{140} 	= 'Remote Desktop Services: An account failed to log on with unknown username';
 	$eventIDs{261}	= 'Listener RDP-Tcp received a connection';
 	$eventIDs{1149} = 'User authentication succeeded';
 	$eventIDs{4624} = 'An account was successfully logged on';
@@ -412,7 +421,8 @@ sub parseEventLog
 					if (($elog == 1 and ($hashRef->{EventID} =~ /^(?:4624|4625|4634|4647|4778|4779)$/)) or
 							($elog == 2 and ($hashRef->{EventID} =~ /^(?:21|22|23|24|25|39|40)$/)) or
 							($elog == 3 and ($hashRef->{EventID} =~ /^(?:261|1149)$/)) or
-							($elog == 4 and ($hashRef->{EventID} =~ /^(?:-1073086408)$/))) {
+							($elog == 4 and ($hashRef->{EventID} =~ /^(?:131|140)$/)) or
+							($elog == 5 and ($hashRef->{EventID} =~ /^(?:-1073086408)$/))) {
 						$hashRef->{EventID} =~ s/-1073086408/56/; # Instance ID to Event ID (System.evtx)
 						if (($hashRef->{Strings} or $hashRef->{Message} or ($hashRef->{EventID} and $hashRef->{EventID} == 261)) and
 								$eventIDs{$hashRef->{EventID}}) {
@@ -441,7 +451,7 @@ sub parseEventLog
 									$$refEvents{$eventInd}{$name} = $value if $value;
 								}
 							}
-							$$refEvents{$eventInd}{Strings} = $$refEvents{$eventInd}{Message} if $hashRef->{EventID} == 56 and $TYPE > 2;
+							$$refEvents{$eventInd}{Strings} = $$refEvents{$eventInd}{Message} if $hashRef->{EventID} == 56 and $TYPE > 2 and !$$refEvents{$eventInd}{Strings};
 							$nbrActivities++;
 						}
 					}
@@ -484,7 +494,7 @@ sub formatEventStrings
 		$formatedString .= "Remote Desktop Services: User authentication succeeded:\r\n";
 		$formatedString .= "User:	$strings[0]\r\n";
 		my $row = 1;
-		if ($strings[3]) { $formatedString .= "Domain: $strings[$row]\r\n"; $row++; }
+		if ($strings[2]) { $formatedString .= "Domain: $strings[$row]\r\n"; $row++; }
 		$formatedString .= "Source Network Address:	$strings[$row]\r\n";
 	} elsif ($eventID == 4648) {
 		$formatedString .= "Subject:\r\n";

@@ -1,9 +1,9 @@
 RDP-Parser
 Description : RDP-Parser extracts RDP activities from Microsoft Windows Event Logs.
-Author 			: Alain Rioux (admin@le-tools.com)
-WebSite			: http://le-tools.com/RDP-Parser.html
+Author		: Alain Rioux (admin@le-tools.com)
+WebSite		: http://le-tools.com/RDP-Parser.html
 SourceForge	: https://sourceforge.net/p/RDP-Parser
-GitHub			: https://github.com/arioux/RDP-Parser
+GitHub		: https://github.com/arioux/RDP-Parser
 
 
 Development
@@ -21,13 +21,13 @@ RDP-Parser has been developped using ActivePerl 5.16.3 with the following module
 ToDo
 ----
 - Add support for Event ID 9009 in System.evtx (I didn't see an example of this Event ID 
-	it in my test)
+  it in my test)
 
 
 Known problems
 --------------
 - For old format (evt), parsing string for event id 528 (and probably the whole range 528 
-	to 540) is buggy, we don't get all events, because strings are not correctly parsed.
+  to 540) is buggy, we don't get all events, because strings are not correctly parsed.
 
 
 
