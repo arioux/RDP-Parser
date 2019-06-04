@@ -1,0 +1,2941 @@
+#!/usr/bin/perl
+# Perl - v: 5.16.3
+#------------------------------------------------------------------------------#
+# Tool name   : RDP-Parser
+# Website     : http://le-tools.com/
+# SourceForge	: https://sourceforge.net/p/rdp-parser
+# GitHub		  : https://github.com/arioux/rdp-parser
+# Description : RDP-Parser extracts RDP activities from Microsoft Windows Event Logs
+# Creation    : 2018-08-09
+# Modified    : 2019-06-04
+my $VERSION   = "2.0";
+# Author      : Alain Rioux (admin@le-tools.com)
+#
+# Copyright (C) 2018-2019  Alain Rioux (le-tools.com)
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+#------------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------#
+# Modules
+#------------------------------------------------------------------------------#
+use strict;
+use warnings;
+use File::Copy;
+use DateTime;
+use DateTime::TimeZone;
+use Time::Local 'timelocal';
+use Time::HiRes qw(usleep);
+use Regexp::IPv6 qw($IPv6_re);
+use Parse::EventLog;
+use Win32::EventLog;
+use Win32::RunAsAdmin;
+use LWP::UserAgent;
+use Excel::Writer::XLSX;
+use Win32::API();
+use Win32::GUI();
+use Win32::GUI 1.06 qw(:toolbar ILC_MASK CW_USEDEFAULT);
+use Win32::Process;
+use threads;
+use threads::shared;
+require "RDP-ParserGraph.pl";
+require "RDP-ParserLang.pl";
+
+#------------------------------------------------------------------------------#
+# Global variables
+#------------------------------------------------------------------------------#
+my $PROGDIR = $0;                                                              # Program path
+while (chop($PROGDIR) ne "\\") { }                                             # Dir only
+my $REF_ARG = \@ARGV;                                                          # If objects passed (using SendTo)
+my $USERDIR;                                                                   # User path
+if (-d "$ENV{'APPDATA'}\\RDP-Parser") { $USERDIR = "$ENV{'APPDATA'}\\RDP-Parser"; }
+else                                  { $USERDIR = $PROGDIR;                      }
+my $LANG_FILE    = "$USERDIR\\Lang.ini";                                       # Langage file
+my $CONFIG_FILE  = "$USERDIR\\RDP-Parser.ini";                                 # Configuration file
+my $DEBUG_FILE   = "$USERDIR\\RDP-Parser_debug.txt";                           # Debug file
+my $URL_DOC      = "http://le-tools.com/RDP-ParserDoc.html";                   # Online documentation
+my $URL_TOOL     = 'http://le-tools.com/RDP-Parser.html#Download';             # Url of the tool
+my $URL_VER      = 'http://www.le-tools.com/download/RDP-ParserVer.txt';       # Url of the version file
+my %CONFIG       :shared;                                                      # Configuration
+my %STR;                                                                       # Strings for GUI
+my $ARROW        :shared;                                                      # Arrow pointer
+my $HOURGLASS    :shared;                                                      # Hourglass pointer
+my $THR_PROCESS;                                                               # Thread for process
+my $THR_UPDATE;                                                                # Thread for update
+my $START       = 0;                                                           # Indicate when program is started
+my $EVENTIDsSET = 0;                                                           # Indicate that Event IDs window have been opened one time
+#------------------------------------------------------------------------------#
+# Graphic elements
+#------------------------------------------------------------------------------#
+my ($winICO, $logoBmp, $logo128, $openDirBmp, $browseBmp, $processBmp, $config32Bmp, $config128Bmp, $helpBmp, $aboutBmp) = &loadGraph();
+
+#------------------------------------------------------------------------------#
+# Strings
+#------------------------------------------------------------------------------#
+&loadDefaultStr(\%STR);                                                        # Load default language (en)
+&loadStr(\%STR, $LANG_FILE) if -e $LANG_FILE and -T $LANG_FILE;                # If language file, load translated strings
+
+#------------------------------------------------------------------------------#
+# Main window
+#------------------------------------------------------------------------------#
+my $screen    = Win32::GUI::GetDesktopWindow(); # Screen resolution
+my $scrnX     = Win32::GUI::Width($screen);
+my $scrnY     = Win32::GUI::Height($screen);
+my $winWidth  = 780;
+my $winHeight = 550;
+my $winPosX   = ($scrnX - $winWidth)  / 2;
+my $winPosY   = ($scrnY - $winHeight) / 2;
+# Main Window
+my $win = Win32::GUI::Window->new(-name        => 'winMain'               ,
+                                  -text        => 'RDP-Parser'            ,
+                                  -background  => [255, 255, 255]         ,
+                                  -size        => [$winWidth, $winHeight] ,
+                                  -pos         => [$winPosX , $winPosY]   ,
+                                  -minheight   => $winHeight              ,
+                                  -minwidth    => $winWidth               , );
+$win->SetIcon($winICO);
+# Fonts
+sub LOGPIXELSX() {88}
+sub getDPI { return(Win32::GUI::DC->new()->GetDeviceCaps(LOGPIXELSX)); }
+my $DPI = &getDPI();
+my ($fontGB, $fontGB2, $font10, $fontGB4, $font10b, $font10u);
+# Larger size (125% and 150%)
+if ($DPI >= 120) {
+  $fontGB  = new Win32::GUI::Font(-name => 'Arial', -size => 10, -bold => 1);
+  $fontGB2 = new Win32::GUI::Font(-name => 'Arial', -size => 12, -bold => 1, -underline => 1);
+  $font10  = new Win32::GUI::Font(-name => 'Arial', -size =>  8);
+	$fontGB4 = new Win32::GUI::Font(-name => 'Arial', -size => 22, -bold => 1);
+  $font10b = new Win32::GUI::Font(-name => 'Arial', -size =>  8, -bold => 1);
+  $font10u = new Win32::GUI::Font(-name => 'Arial', -size =>  8, -bold => 1, -underline => 1);
+# Normal size
+} else {
+  $fontGB  = new Win32::GUI::Font(-name => 'Arial', -size => 12, -bold => 1);
+  $fontGB2 = new Win32::GUI::Font(-name => 'Arial', -size => 14, -bold => 1, -underline => 1);
+  $font10  = new Win32::GUI::Font(-name => 'Arial', -size => 10);
+	$fontGB4 = new Win32::GUI::Font(-name => 'Arial', -size => 24, -bold => 1);
+  $font10b = new Win32::GUI::Font(-name => 'Arial', -size => 10, -bold => 1);
+  $font10u = new Win32::GUI::Font(-name => 'Arial', -size => 10, -bold => 1, -underline => 1);
+}
+# Load Pointers
+my $loadImage = new Win32::API('user32', 'LoadImage', ['N','N','I','I','I','I'],'N');
+$HOURGLASS    = $loadImage->Call(0, 32514, 2, 0, 0, 0x8040);
+$ARROW        = $loadImage->Call(0, 32512, 2, 0, 0, 0x8040);
+# Header
+$win->AddLabel(         -name         => 'lblLogo'              ,
+                        -size         => [ 48, 48]              ,
+                        -pos          => [  0,  0]              ,
+                        -bitmap       => $logoBmp               ,
+                        -background   => [250, 250, 250]        , );
+$win->AddLabel(         -name         => 'lblHeader'            ,
+                        -size         => [$winWidth, 48]        ,
+                        -pos          => [ 48,  0]              ,
+                        -background   => [250, 250, 250]        , );
+$win->AddLabel(         -name         => 'lblHeaderShadowT'     ,
+											  -size         => [452, 45]              ,
+											  -pos          => [59,  3]               ,
+											  -foreground   => [100, 100, 100]        ,
+											  -addstyle     => 11                     , # Transparent
+											  -text         => 'RDP-Parser'           ,
+											  -font         => $fontGB4               , );
+$win->AddLabel(         -name         => 'lblHeaderT'           ,
+											  -size         => [452, 45]              ,
+											  -pos          => [ 58,  2]              ,
+											  -addstyle     => 11                     , # Transparent
+											  -foreground   => [128, 128, 128]        ,
+										  	-text         => 'RDP-Parser'           ,
+											  -font         => $fontGB4               , );
+# Input section
+$win->AddLabel(         -name         => 'lblInputT'            ,
+                        -size         => [$winWidth, 20]        ,
+                        -pos          => [  0, 48]              ,
+                        -text         => ' '.$STR{'Input'}.' '.$STR{'directory'},
+                        -font         => $fontGB                ,
+                        -foreground   => [255, 255, 255]        ,
+                        -background   => [128, 128,  128]       , );
+$win->AddTextfield(     -name         => 'tfInput'              ,
+												-font         => $font10                ,
+                        -size         => [515, 22]              ,
+                        -pos          => [  5, 80]              , );
+$win->AddButton(        -name         => 'btnInput'             ,
+                        -size         => [ 22, 22]              ,
+                        -pos          => [522, 80]              ,
+                        -bitmap       => $openDirBmp            ,
+												-tip          => $STR{'selDir'}         , );
+$win->AddButton(        -name         => 'btnCopyFromLive'      ,
+                        -size         => [280, 22]              ,
+                        -pos          => [  5,110]              ,
+                        -text         => $STR{'CopyFromLive'}   ,
+                        -font         => $font10                ,
+												-disabled     => 1                      , );
+$win->AddCheckbox(      -name         => 'chCopyFromLiveAll'    ,
+                        -size         => [100, 22]              ,
+                        -pos          => [290,110]              ,
+                        -text         => $STR{'AllEventLogs'}   ,
+                        -background   => [255, 255, 255]        ,
+                        -font         => $font10                , );
+$win->AddLabel(         -name         => 'lblOldLogFlag'        , # Hidden value, indicates if input is old Event Log
+                        -text         => ''                     ,
+												-visible      => 0                      , );
+# Filter section
+$win->AddLabel(         -name         => 'lblFiltersT'          ,
+                        -size         => [$winWidth, 20]        ,
+                        -pos          => [  0,140]              ,
+                        -text         => ' '.$STR{'Filters'}    ,
+                        -font         => $fontGB                ,
+                        -foreground   => [255, 255, 255]        ,
+                        -background   => [128, 128,  128]       , );
+$win->AddLabel(         -name         => 'lblFiltersEvent'      ,
+                        -size         => [100, 20]              ,
+                        -pos          => [  5,167]              ,
+                        -font         => $font10                ,
+                        -background   => [255, 255, 255]        , 
+                        -text         => $STR{'Events'}.':'     , );
+$win->AddRadioButton(   -name         => 'rbFiltersAllEvents'   ,
+                        -size         => [100, 22]              ,
+                        -pos          => [110,165]              ,
+                        -background   => [255, 255, 255]        ,
+                        -text         => $STR{'NoFilter'}       ,
+                        -font         => $font10                ,
+                        -checked      => 1                      ,
+                        -group        => 1                      , );
+$win->AddRadioButton(   -name         => 'rbFiltersSelEvents'   ,
+                        -size         => [ 80, 22]              ,
+                        -pos          => [215,165]              ,
+                        -background   => [255, 255, 255]        ,
+                        -text         => $STR{'Select'}.':'     ,
+                        -font         => $font10                , );
+$win->AddButton(        -name         => 'btnFiltersEventIDs'   ,
+                        -size         => [ 80, 22]              ,
+                        -pos          => [300,165]              ,
+                        -text         => $STR{'EventIDs'}.'...' ,
+                        -font         => $font10                ,
+												-disabled     => 1                      , );
+$win->AddLabel(         -name         => 'lblFiltersIPs'        ,
+                        -size         => [100, 20]              ,
+                        -pos          => [  5,192]              ,
+                        -font         => $font10                ,
+                        -background   => [255, 255, 255]        , 
+                        -text         => $STR{'IPAddresses'}.':', );
+$win->AddRadioButton(   -name         => 'rbFiltersNo'          ,
+                        -size         => [100, 22]              ,
+                        -pos          => [110,190]              ,
+                        -background   => [255, 255, 255]        ,
+                        -text         => $STR{'NoFilter'}       ,
+                        -font         => $font10                ,
+                        -group        => 1                      , );
+$win->AddRadioButton(   -name         => 'rbFiltersPublicIPs'   ,
+                        -size         => [160, 22]              ,
+                        -pos          => [215,190]              ,
+                        -background   => [255, 255, 255]        ,
+                        -text         => $STR{'PublicIPs'}      ,
+                        -font         => $font10                ,
+                        -checked      => 1                      , );
+$win->AddRadioButton(   -name         => 'rbFiltersAllIPs'      ,
+                        -size         => [220, 22]              ,
+                        -pos          => [380,190]              ,
+                        -background   => [255, 255, 255]        ,
+                        -text         => $STR{'WithIPs'}        ,
+                        -font         => $font10                , );
+$win->AddLabel(         -name         => 'lblFiltersDates'      ,
+                        -size         => [100, 20]              ,
+                        -pos          => [  5,222]              ,
+                        -font         => $font10                ,
+                        -background   => [255, 255, 255]        , 
+                        -text         => $STR{'Dates'}.':'      , );
+$win->AddCombobox(      -name         => 'cbFiltersDate1'       ,
+												-size         => [ 80, 22]              ,
+												-pos          => [110,220]              ,
+												-font         => $font10                ,
+												-dropdownlist => 1                      ,
+												-vscroll      => 1                      , );
+$win->cbFiltersDate1->Add($STR{'Equal'}, $STR{'After'});
+$win->cbFiltersDate1->SetCurSel(0);
+$win->AddDateTime(      -name         => 'dtFiltersDate1'       ,
+												-size         => [110, 24]              ,
+												-pos          => [195,220]              ,
+												-font         => $font10                ,
+												-background   => [255, 255, 255]        ,
+												-format       => 'shortdate'            ,
+												-shownone     => 1                      , );
+$win->dtFiltersDate1->SetNone();
+$win->AddDateTime(      -name         => 'dtFiltersTime1'       ,
+												-size         => [100, 24]              ,
+												-pos          => [310,220]              ,
+												-font         => $font10                ,
+												-background   => [255, 255, 255]        ,
+												-format       => 'time'                 ,
+												-shownone     => 1                      , );
+$win->dtFiltersTime1->SetNone();
+$win->AddLabel(         -name         => 'lblFiltersDatesBefore',
+                        -size         => [ 70, 20]              ,
+                        -pos          => [415,223]              ,
+                        -font         => $font10                ,
+                        -background   => [255, 255, 255]        , 
+                        -text         => $STR{'Before'}.':'     ,
+												-align        => 'right'                , );
+$win->AddDateTime(      -name         => 'dtFiltersDate2'       ,
+												-size         => [110, 24]              ,
+												-pos          => [495,220]              ,
+												-font         => $font10                ,
+												-background   => [255, 255, 255]        ,
+												-format       => 'shortdate'            ,
+												-shownone     => 1                      , );
+$win->dtFiltersDate2->SetNone();
+$win->AddDateTime(      -name         => 'dtFiltersTime2'       ,
+												-size         => [100, 24]              ,
+												-pos          => [610,220]              ,
+												-font         => $font10                ,
+												-background   => [255, 255, 255]        ,
+												-format       => 'time'                 ,
+												-shownone     => 1                      , );
+$win->dtFiltersTime2->SetNone();
+$win->AddLabel(         -name         => 'lblFiltersKeyword'    ,
+                        -size         => [100, 20]              ,
+                        -pos          => [  5,253]              ,
+                        -font         => $font10                ,
+                        -background   => [255, 255, 255]        , 
+                        -text         => $STR{'Keyword'}.':'    , );
+$win->AddCheckbox(      -name         => 'chFiltersKLogType10'  ,
+                        -size         => [120, 22]              ,
+                        -pos          => [110,251]              ,
+                        -text         => 'Logon Type: 10'       ,
+												-font         => $font10                ,
+                        -background   => [255, 255, 255]        ,
+                        -checked      => 0                      , );
+$win->AddCheckbox(      -name         => 'chFiltersKRDPTcp'     ,
+                        -size         => [100, 22]              ,
+                        -pos          => [235,251]              ,
+                        -text         => 'RDP-Tcp'              ,
+												-font         => $font10                ,
+                        -background   => [255, 255, 255]        ,
+                        -checked      => 0                      , );
+$win->AddTextfield(     -name         => 'tfFiltersKeyword'     ,
+												-font         => $font10                ,
+                        -size         => [400, 22]              ,
+                        -pos          => [110,280]              , );
+$win->AddCheckbox(      -name         => 'chFiltersKeywordCase' ,
+                        -size         => [100, 22]              ,
+                        -pos          => [515,280]              ,
+                        -text         => $STR{'matchCase'}      ,
+												-font         => $font10                ,
+                        -background   => [255, 255, 255]        , );
+# Report options section
+$win->AddLabel(         -name         => 'lblReportOptionsT'    ,
+                        -size         => [$winWidth, 20]        ,
+                        -pos          => [  0,309]              ,
+                        -text         => ' '.$STR{'ReportOptions'},
+                        -font         => $fontGB                ,
+                        -foreground   => [255, 255, 255]        ,
+                        -background   => [128, 128, 128]        , );
+$win->AddLabel(         -name         => 'lblReportPath'        ,
+                        -size         => [ 60, 20]              ,
+                        -pos          => [  5,343]              ,
+                        -font         => $font10                ,
+                        -background   => [255, 255, 255]        , 
+                        -text         => $STR{'Path'}.':'       , );
+$win->AddTextfield(     -name         => 'tfReportDir'          ,
+												-font         => $font10                ,
+                        -size         => [400, 22]              ,
+                        -pos          => [110,340]              , );
+$win->AddCombobox(      -name         => 'cbReportFormat'       ,
+                        -size         => [ 60, 22]              ,
+                        -pos          => [459,340]              ,
+                        -dropdownlist => 1                      ,
+                        -vscroll      => 1                      , );
+$win->cbReportFormat->Add('XLSX', 'TXT', 'HTML');
+$win->cbReportFormat->SetCurSel(0);
+$win->AddButton(        -name         => 'btnReportDir'         ,
+                        -size         => [ 22, 22]              ,
+                        -pos          => [522,340]              ,
+                        -bitmap       => $openDirBmp            ,
+												-tip          => $STR{'selDir'}         , );
+$win->AddButton(        -name         => 'btnOpenReportDir'     ,
+                        -size         => [ 22, 22]              ,
+                        -pos          => [546,340]              ,
+                        -bitmap       => $browseBmp             ,
+                        -tip          => $STR{'openReportDir'}  , );
+$win->AddLabel(         -name         => 'lblReportCols'        ,
+                        -size         => [100, 20]              ,
+                        -pos          => [  5,373]              ,
+                        -font         => $font10                ,
+                        -background   => [255, 255, 255]        , 
+                        -text         => $STR{'Columns'}.':'    , );
+$win->AddRadioButton(   -name         => 'rbReportColsAll'      ,
+                        -size         => [ 60, 22]              ,
+                        -pos          => [110,370]              ,
+                        -background   => [255, 255, 255]        ,
+                        -text         => $STR{'All'}            ,
+                        -font         => $font10                ,
+                        -checked      => 1                      ,
+                        -group        => 1                      , );
+$win->AddRadioButton(   -name         => 'rbReportColsSel'      ,
+                        -size         => [ 80, 22]              ,
+                        -pos          => [175,370]              ,
+                        -background   => [255, 255, 255]        ,
+                        -text         => $STR{'Select'}.':'     ,
+                        -font         => $font10                , );
+$win->AddButton(        -name         => 'btnReportCols'        ,
+                        -size         => [ 80, 22]              ,
+                        -pos          => [260,370]              ,
+                        -text         => $STR{'Columns'}.'...'  ,
+                        -font         => $font10                ,
+												-disabled     => 1                      , );
+$win->AddCheckbox(      -name         => 'chReportIPsOnly'      ,
+                        -size         => [160, 22]              ,
+                        -pos          => [365,370]              ,
+                        -text         => $STR{'chReportIPsOnly'},
+												-font         => $font10                ,
+                        -background   => [255, 255, 255]        ,
+                        -checked      => 1                      , );
+$win->AddCheckbox(      -name         => 'chReportDataInline'   ,
+                        -size         => [180, 22]              ,
+                        -pos          => [530,370]              ,
+                        -text         => $STR{'chReportDataInline'},
+												-font         => $font10                ,
+                        -background   => [255, 255, 255]        ,
+                        -checked      => 1                      , );
+$win->AddLabel(         -name         => 'lblReportTZ'          ,
+                        -size         => [100, 20]              ,
+                        -pos          => [  5,403]              ,
+                        -font         => $font10                ,
+                        -background   => [255, 255, 255]        , 
+                        -text         => $STR{'Timezone'}.':'   , );
+$win->AddCombobox(      -name         => 'cbOutputTZ'           ,
+												-size         => [260,100]              ,
+												-pos          => [110,400]              ,
+												-font         => $font10                ,
+												-dropdownlist => 1                      ,
+												-vscroll      => 1                      , );
+$win->AddLabel(         -name         => 'lblReportOther'       ,
+                        -size         => [100, 20]              ,
+                        -pos          => [  5,433]              ,
+                        -font         => $font10                ,
+                        -background   => [255, 255, 255]        , 
+                        -text         => $STR{'Others'}.':'     , );
+$win->AddCheckbox(      -name         => 'chReportAddStats'     ,
+                        -size         => [200, 22]              ,
+                        -pos          => [110,430]              ,
+                        -text         => $STR{'AddStats'}       ,
+												-font         => $font10                ,
+                        -background   => [255, 255, 255]        ,
+                        -checked      => 1                      , );
+$win->AddCheckbox(      -name         => 'chReportOpen'         ,
+                        -size         => [185, 22]              ,
+                        -pos          => [315,430]              ,
+                        -text         => $STR{'chReportOpen'}   ,
+												-font         => $font10                ,
+                        -background   => [255, 255, 255]        ,
+                        -checked      => 1                      , );
+# Footer
+$win->AddLabel(       -name        => 'lblFooter'             ,
+                      -size        => [$winWidth, 80]         ,
+                      -pos         => [  2,$winHeight-82]     ,
+                      -background  => [250, 250, 250]         ,
+                      -foreground  => [128, 128, 128]         , );
+$win->AddLabel(       -name        => 'lblNotReady'           ,
+                      -size        => [170, 22]               ,
+                      -pos         => [ 10, $winHeight-65]    ,
+                      -background  => [250, 250, 250]         ,
+                      -foreground  => [  0, 102, 204]         ,
+                      -text        => $STR{'lblNotReady'}     ,
+                      -font        => $font10u                ,
+                      -notify      => 1                       , );
+$win->AddLabel(       -name        => 'lblPbCurr'             ,
+                      -size        => [495, 20]               ,
+                      -pos         => [ 10, $winHeight-75]    ,
+                      -font        => $font10                 ,
+                      -truncate    => 1                       ,
+                      -background  => [250, 250, 250]         ,
+                      -visible     => 0                       , );
+$win->AddProgressBar( -name        => 'pb'                    ,
+                      -size        => [410, 20]               ,
+                      -pos         => [ 10, $winHeight-55]    ,
+                      -smooth      => 1                       ,
+                      -visible     => 0                       , );
+$win->AddLabel(       -name        => 'lblPbCount'            ,
+                      -size        => [130, 20]               ,
+                      -pos         => [425, $winHeight-53]    ,
+                      -font        => $font10                 ,
+                      -truncate    => 1                       ,
+                      -background  => [250, 250, 250]         ,
+                      -visible     => 0                       , );
+$win->AddButton(      -name        => 'btnProcess'            ,
+                      -size        => [ 40, 40]               ,
+                      -pos         => [510,$winHeight-75]     ,
+                      -bitmap      => $processBmp             ,
+                      -background  => [250, 250, 250]         ,
+                      -tip         => $STR{'Process'}         ,
+                      -disabled    => 1                       , );
+$win->AddButton(      -name        => 'btnWinConfig'          ,
+                      -size        => [ 40, 40]               ,
+                      -pos         => [555,$winHeight-75]     ,
+                      -bitmap      => $config32Bmp            ,
+                      -background  => [250, 250, 250]         ,
+                      -tip         => $STR{'Settings'}        , );
+$win->AddButton(      -name        => 'btnHelp'               ,
+                      -size        => [ 40, 40]               ,
+                      -pos         => [600,$winHeight-75]     ,
+                      -bitmap      => $helpBmp                ,
+                      -background  => [250, 250, 250]         ,
+                      -tip         => $STR{'btnHelpTip'}      , );
+$win->AddButton(      -name        => 'btnAbout'              ,
+                      -size        => [ 40, 40]               ,
+                      -pos         => [645,$winHeight-75]     ,
+                      -bitmap      => $aboutBmp               ,
+                      -background  => [250, 250, 250]         ,
+                      -tip         => $STR{'About'}           , );
+
+#------------------------------------------------------------------------------#
+# Event IDs filter window
+#------------------------------------------------------------------------------#
+my $winEventIDs = Win32::GUI::Window->new(-name        => 'winEventIDs'         ,
+                                          -background  => [255, 255, 255]       ,
+                                          -parent      => $win                  ,
+                                          -text        => $STR{'EventIDs'}      ,
+                                          -pos         => [$winPosX, $winPosY]  ,
+                                          -size        => [640, 460]            ,
+                                          -hasmaximize => 1                     ,
+                                          -hasminimize => 1                     ,
+                                          -resizable   => 1                     ,
+                                          -dialogui    => 1                     , );
+$winEventIDs->SetIcon($winICO);
+$winEventIDs->AddButton(      -name         => 'btnEventIDsCheckAll',
+															-size         => [100, 22]            ,
+															-pos          => [  5,  5]            ,
+															-text         => $STR{'CheckAll'}     ,
+															-font         => $font10              , );
+$winEventIDs->AddButton(      -name         => 'btnEventIDsUnCheckAll',
+															-size         => [100, 22]            ,
+															-pos          => [110,  5]            ,
+															-text         => $STR{'UncheckAll'}   ,
+															-font         => $font10              , );
+$winEventIDs->AddTreeView(		-name        => 'tvEventIDs'          ,
+															-pos         => [  5, 30]             ,
+															-size        => [585,275]             ,
+															-font        => $font10               ,
+															-rootlines   => 1                     ,
+															-lines       => 1                     ,
+															-checkboxes  => 1                     ,
+															-buttons     => 1                     , );
+$winEventIDs->AddButton(      -name        => 'btnEventIDsOk'       ,
+                              -text        => $STR{'Ok'}            ,
+                              -font        => $font10               ,
+                              -size        => [ 60, 25]             ,
+                              -pos         => [250, 330]            ,
+                              -ok          => 1                     ,
+                              -default     => 1                     , );
+
+#------------------------------------------------------------------------------#
+# Report Options Columns window
+#------------------------------------------------------------------------------#
+my $winCols = Win32::GUI::Window->new(-name        => 'winCols'             ,
+																			-background  => [255, 255, 255]       ,
+																			-parent      => $win                  ,
+																			-text        => $STR{'Columns'}       ,
+																			-pos         => [$winPosX, $winPosY]  ,
+																			-size        => [240, 260]            ,
+																			-hasmaximize => 0                     ,
+																			-hasminimize => 0                     ,
+																			-resizable   => 0                     ,
+																			-dialogui    => 1                     , );
+$winCols->SetIcon($winICO);
+$winCols->AddListView(-name        => 'lvCols'              ,
+											-pos         => [  5,  5]             ,
+											-size        => [225,190]             ,
+											-font        => $font10               ,
+                      -background  => [255, 255, 255]       ,
+											-checkboxes  => 1                     ,
+											-gridlines   => 0                     ,
+											-hottrack    => 1                     ,
+											-nocolumnheader => 1                  , );
+$winCols->lvCols->InsertColumn(-width => 180, index => 0, -text => 'Col1',);
+$winCols->lvCols->InsertItem(-text => 'TimeGenerated');
+$winCols->lvCols->InsertItem(-text => 'TimeWritten');
+$winCols->lvCols->InsertItem(-text => 'Computer');
+$winCols->lvCols->InsertItem(-text => 'Source');
+$winCols->lvCols->InsertItem(-text => 'RecordNumber');
+$winCols->lvCols->InsertItem(-text => 'Category');
+$winCols->lvCols->InsertItem(-text => 'EventID');
+$winCols->lvCols->InsertItem(-text => 'EventType');
+$winCols->lvCols->InsertItem(-text => 'Details');
+$winCols->AddButton(	-name        => 'btnColsOk'           ,
+											-text        => $STR{'Ok'}            ,
+											-font        => $font10               ,
+											-size        => [ 60, 25]             ,
+											-pos         => [ 90, 200]            ,
+											-ok          => 1                     ,
+											-default     => 1                     , );
+
+#------------------------------------------------------------------------------#
+# Config window
+#------------------------------------------------------------------------------#
+my $winConfig = Win32::GUI::DialogBox->new( -name        => 'winConfig'             ,
+                                            -parent      => $win                    ,
+                                            -text        => $STR{'Settings'}        ,
+                                            -pos         => [$winPosX, $winPosY]    ,
+                                            -size        => [600, 225]              ,
+                                            -background  => [255, 255, 255]         ,
+                                            -hasmaximize => 0                       ,
+                                            -hasminimize => 0                       ,
+                                            -helpbutton  => 0                       ,
+                                            -resizable   => 0                       ,
+                                            -dialogui    => 1                       , );
+$winConfig->SetIcon($winICO);
+$winConfig->AddLabel(     -name         => 'lblLogo'             ,
+                          -size         => [128,128]             ,
+                          -pos          => [  0,  5]             ,
+                          -bitmap       => $config128Bmp         ,
+                          -background   => [255, 255, 255]       , );
+# Tabstrip
+$winConfig->AddTabStrip(            -name         => 'configTab'      ,
+                                    -size         => [455,190]        ,
+                                    -pos          => [140,  5]        ,
+                                    -fixedwidth   => 1                ,
+                                    -tabstop      => 1                ,
+                                    -background   => [255, 255, 255]  , );
+$winConfig->configTab->InsertItem(  -text         => $STR{'general'}  , );
+$winConfig->configTab->InsertItem(  -text         => $STR{'logging'}  , );
+# General tab
+# Tool Section
+$winConfig->AddLabel(       -name        => 'lblToolShadowT'        ,
+                            -size        => [ 80, 22]               ,
+                            -pos         => [151, 36]               ,
+                            -foreground  => [180, 180, 180]         ,
+                            -background  => [255, 255, 255]         ,
+                            -text        => $STR{'Tool'}.':'        ,
+                            -font        => $fontGB2                , );
+$winConfig->AddLabel(       -name        => 'lblToolT'              ,
+                            -size        => [ 80, 22]               ,
+                            -pos         => [150, 35]               ,
+                            -addstyle    => 11                      , # Transparent
+                            -foreground  => [100, 100, 100]         ,
+                            -text        => $STR{'Tool'}.':'        ,
+                            -font        => $fontGB2                , );
+$winConfig->AddButton(      -name        => 'btnExportLang'         ,
+                            -size        => [125, 24]               ,
+                            -pos         => [150, 68]               ,
+                            -text        => $STR{'Export'}.'Lang.ini',
+                            -font        => $font10                 , );
+$winConfig->AddButton(      -name        => 'btnOpenUserDir'        ,
+                            -size        => [125, 24]               ,
+                            -pos         => [285, 68]               ,
+                            -text        => $STR{'OpenUserDir'}.'...',
+                            -font        => $font10                 , );
+$winConfig->AddButton(      -name        => 'btnCheckUpdate'        ,
+                            -size        => [125, 24]               ,
+                            -pos         => [150, 98]               ,
+                            -text        => $STR{'checkUpdate'}     ,
+                            -font        => $font10                 , );
+$winConfig->AddCheckbox(    -name        => 'chAutoUpdate'          ,
+                            -size        => [250, 20]               ,
+                            -pos         => [285,100]               ,
+                            -text        => $STR{'AutoUpdateTip'}   ,
+                            -background  => [255, 255, 255]         ,
+                            -font        => $font10                 ,
+                            -tabstop     => 1                       ,
+                            -checked     => 1                       , );
+# Logging tab
+$winConfig->AddCheckbox(    -name        => 'chEnableLogging'       ,
+                            -size        => [200, 20]               ,
+                            -pos         => [150, 40]               ,
+                            -background  => [255, 255, 255]         ,
+                            -text        => $STR{'chEnableLogging'} ,
+                            -font        => $font10                 ,
+                            -checked     => 1                       ,
+                            -visible     => 0                       ,
+                            -tabstop     => 1                       , );
+$winConfig->AddButton(      -name        => 'btnOpenLog'            ,
+                            -size        => [150, 24]               ,
+                            -pos         => [400, 38]               ,
+                            -text        => $STR{'OpenLog'}         ,
+                            -font        => $font10                 ,
+                            -visible     => 0                       ,
+                            -tabstop     => 1                       , );
+$winConfig->AddRadioButton( -name        => 'rbUseDefaultDir'       ,
+                            -size        => [150, 20]               ,
+                            -pos         => [150, 70]               ,
+                            -background  => [255, 255, 255]         ,
+                            -text        => $STR{'rbUseDefaultDir'} ,
+                            -font        => $font10                 ,
+                            -group       => 1                       ,
+                            -checked     => 1                       ,
+                            -visible     => 0                       ,
+                            -tabstop     => 1                       , );
+$winConfig->AddRadioButton( -name        => 'rbLoggingDir'          ,
+                            -size        => [245, 20]               ,
+                            -pos         => [150, 95]               ,
+                            -font        => $font10                 ,
+                            -background  => [255, 255, 255]         , 
+                            -text        => $STR{'rbLoggingDir'}.':',
+                            -visible     => 0                       , );
+$winConfig->AddTextfield(   -name        => 'tfLoggingDir'          ,
+                            -size        => [400, 22]               ,
+                            -pos         => [150,120]               ,
+                            -visible     => 0                       ,
+                            -tabstop     => 1                       , );
+$winConfig->AddButton(      -name        => 'btnLoggingDir'         ,
+                            -size        => [ 22, 22]               ,
+                            -pos         => [552,120]               ,
+                            -bitmap      => $openDirBmp             ,
+                            -disabled    => 1                       ,
+                            -visible     => 0                       ,
+                            -tabstop     => 1                       , );
+
+#------------------------------------------------------------------------------#
+# Starting program
+#------------------------------------------------------------------------------#
+# List of timezone
+my @listTZ = DateTime::TimeZone->all_names;
+foreach (@listTZ) { $win->cbOutputTZ->Add($_); }
+&loadConfig(\%CONFIG);
+if ($CONFIG{'TOOL_AUTO_UPDATE'}) { $THR_UPDATE = threads->create(sub { sleep(2); &updateTool(0); }); }
+# Set input (objects sent)
+if ($$REF_ARG[0] and -d $$REF_ARG[0]) {	$win->tfInput->Text($$REF_ARG[0]); &setInput($$REF_ARG[0]); }
+$START = 1;
+$win->Show();
+Win32::GUI::Dialog();
+
+#--------------------------#
+sub winMain_Resize
+#--------------------------#
+{
+	# Resize and move controls
+  $win->lblHeader->Width($win->ScaleWidth()-48);
+  $win->lblInputT->Width($win->ScaleWidth());
+  $win->tfInput->Width($win->ScaleWidth()-74);
+  $win->btnInput->Left($win->ScaleWidth()-67);
+  $win->lblFiltersT->Width($win->ScaleWidth());
+  $win->tfFiltersKeyword->Width($win->ScaleWidth()-250);
+  $win->chFiltersKeywordCase->Left($win->ScaleWidth()-135);
+  $win->lblReportOptionsT->Width($win->ScaleWidth());
+  $win->tfReportDir->Width($win->ScaleWidth()-250);
+  $win->cbReportFormat->Left($win->ScaleWidth()-135);
+  $win->btnReportDir->Left($win->ScaleWidth()-72);
+  $win->btnOpenReportDir->Left($win->ScaleWidth()-49);
+  # Footer
+  $win->lblFooter->Top($win->ScaleHeight()-55);
+  $win->lblFooter->Width($win->ScaleWidth());
+  $win->lblNotReady->Top($win->ScaleHeight()-40);
+  $win->lblPbCurr->Top($win->ScaleHeight()-48);
+  $win->lblPbCurr->Width($win->ScaleWidth()-240);
+  $win->pb->Top($win->ScaleHeight()-27);
+  $win->pb->Width($win->ScaleWidth()-330);
+  $win->lblPbCount->Top($win->ScaleHeight()-25);
+  $win->lblPbCount->Left($win->ScaleWidth()-315);
+  $win->btnProcess->Move($win->ScaleWidth()-180, $win->ScaleHeight()-45);
+  $win->btnWinConfig->Move($win->ScaleWidth()-135, $win->ScaleHeight()-45);
+  $win->btnHelp->Move($win->ScaleWidth()-90, $win->ScaleHeight()-45);
+  $win->btnAbout->Move($win->ScaleWidth()-45, $win->ScaleHeight()-45);
+  
+}  #--- End winMain_Resize
+
+#--------------------------#
+sub tfInput_Change { &isProcessReady(0); }
+#--------------------------#
+
+#--------------------------#
+sub btnInput_Click
+#--------------------------#
+{
+  # Local variables
+  my $lastDir = $win->tfInput->Text();
+	$win->lblOldLogFlag->Text('');
+  my $dir;
+	# Show dialog window
+	if ($lastDir) {
+		my(@parts) = split(/\\/, $lastDir);
+		if (pop(@parts) =~ /\./) { while ($lastDir =~ /[^\\]$/) { chop($lastDir); } }
+		$dir = Win32::GUI::BrowseForFolder(-owner => $win, -title => $STR{'selDir'}.':', -folderonly => 1, -newui => 1, -directory => $lastDir);
+	} else {
+		$dir = Win32::GUI::BrowseForFolder(-owner => $win, -title => $STR{'selDir'}.':', -folderonly => 1, -newui => 1);
+	}
+	# Selected folder
+	if ($dir and -d $dir) {
+		# Write the path in the textfield
+		chop($dir) if $dir =~ /\\$/;
+		$win->tfInput->Text($dir);
+		&setInput($dir);
+	}
+  return(1);
+  
+}  #--- End btnInput_Click
+
+#--------------------------#
+sub setInput
+#--------------------------#
+{
+	# Local variable
+	my $dir = shift;
+	# Fill Event IDs treeview (old or new Event Logs format)
+	my $oldEventLogFile;
+	if (opendir(DIR,"$dir\\")) {
+		while (my $file = readdir(DIR)) {
+			$oldEventLogFile = 'security.evt' if $file =~ /security.evt$/;
+			$oldEventLogFile = 'SecEvent.Evt' if $file =~ /SecEvent.Evt$/;
+		}
+	}
+	closedir(DIR);
+	$win->lblOldLogFlag->Text(1) if $oldEventLogFile;
+	$winEventIDs->tvEventIDs->DeleteAllItems();
+	if ($oldEventLogFile) {
+		my $parent = $winEventIDs->tvEventIDs->InsertItem(-text => $oldEventLogFile);
+		$winEventIDs->tvEventIDs->InsertItem(-parent => $parent, -text => '528: Successful Logon');
+		$winEventIDs->tvEventIDs->InsertItem(-parent => $parent, -text => '529: Logon Failure - Unknown user name or bad password');
+		$winEventIDs->tvEventIDs->InsertItem(-parent => $parent, -text => '530: Logon Failure - Account logon time restriction violation');
+		$winEventIDs->tvEventIDs->InsertItem(-parent => $parent, -text => '531: Logon Failure - Account currently disabled');
+		$winEventIDs->tvEventIDs->InsertItem(-parent => $parent, -text => '532: Logon Failure - The specified user account has expired');
+		$winEventIDs->tvEventIDs->InsertItem(-parent => $parent, -text => '533: Logon Failure - User not allowed to logon at this computer');
+		$winEventIDs->tvEventIDs->InsertItem(-parent => $parent, -text => '534: Logon Failure - The user has not been granted the requested logon type at this machine');
+		$winEventIDs->tvEventIDs->InsertItem(-parent => $parent, -text => "535: Logon Failure - The specified account's password has expired");
+		$winEventIDs->tvEventIDs->InsertItem(-parent => $parent, -text => '536: Logon Failure - The NetLogon component is not active');
+		$winEventIDs->tvEventIDs->InsertItem(-parent => $parent, -text => '537: Logon failure - The logon attempt failed for other reasons.');
+		$winEventIDs->tvEventIDs->InsertItem(-parent => $parent, -text => '538: User Logoff');
+		$winEventIDs->tvEventIDs->InsertItem(-parent => $parent, -text => '539: Logon Failure - Account locked out');
+		$winEventIDs->tvEventIDs->InsertItem(-parent => $parent, -text => '540: Successful Network Logon');
+		$winEventIDs->tvEventIDs->InsertItem(-parent => $parent, -text => '552: Logon attempt using explicit credentials');
+		$winEventIDs->tvEventIDs->InsertItem(-parent => $parent, -text => '682: Session reconnected to winstation');
+		$winEventIDs->tvEventIDs->InsertItem(-parent => $parent, -text => '683: Session disconnected from winstation');
+	} else {
+		my $parent = $winEventIDs->tvEventIDs->InsertItem(-text => 'Microsoft-Windows-TerminalServices-LocalSessionManager%4Operational.evtx');
+		$winEventIDs->tvEventIDs->InsertItem(-parent => $parent, -text => '21: Remote Desktop Services: Session logon succeeded.');
+		$winEventIDs->tvEventIDs->InsertItem(-parent => $parent, -text => '22: Remote Desktop Services: Shell start notification received.');
+		$winEventIDs->tvEventIDs->InsertItem(-parent => $parent, -text => '23: Remote Desktop Services: Session logoff succeeded.');
+		$winEventIDs->tvEventIDs->InsertItem(-parent => $parent, -text => '24: Remote Desktop Services: Session has been disconnected.');
+		$winEventIDs->tvEventIDs->InsertItem(-parent => $parent, -text => '25: Remote Desktop Services: Session reconnection succeeded.');
+		$winEventIDs->tvEventIDs->InsertItem(-parent => $parent, -text => '39: Session <X> has been disconnected by session <Y>.');
+		$winEventIDs->tvEventIDs->InsertItem(-parent => $parent, -text => '40: Session <X> has been disconnected, reason code <Z>.');
+		$parent = $winEventIDs->tvEventIDs->InsertItem(-text => 'Microsoft-Windows-RemoteDesktopServices-RdpCoreTS%4Operational.evtx');
+		$winEventIDs->tvEventIDs->InsertItem(-parent => $parent, -text => '131: Remote Desktop Services: An account failed to log on.');
+		$winEventIDs->tvEventIDs->InsertItem(-parent => $parent, -text => '140: Remote Desktop Services: An account failed to log on with unknown username.');
+		$parent = $winEventIDs->tvEventIDs->InsertItem(-text => 'Microsoft-Windows-TerminalServices-RemoteConnectionManager%4Operational.evtx');
+		$winEventIDs->tvEventIDs->InsertItem(-parent => $parent, -text => '261: Listener RDP-Tcp received a connection.');
+		$winEventIDs->tvEventIDs->InsertItem(-parent => $parent, -text => '1149: User authentication succeeded.');
+		$parent = $winEventIDs->tvEventIDs->InsertItem(-text => 'Security.evtx');
+		$winEventIDs->tvEventIDs->InsertItem(-parent => $parent, -text => '4624: An account was successfully logged on.');
+		$winEventIDs->tvEventIDs->InsertItem(-parent => $parent, -text => '4625: An account failed to log on.');
+		$winEventIDs->tvEventIDs->InsertItem(-parent => $parent, -text => '4634: An account was logged off.');
+		$winEventIDs->tvEventIDs->InsertItem(-parent => $parent, -text => '4647: User initiated logoff.');
+		$winEventIDs->tvEventIDs->InsertItem(-parent => $parent, -text => '4778: A session was reconnected to a Window Station.');
+		$winEventIDs->tvEventIDs->InsertItem(-parent => $parent, -text => '4779: A session was disconnected from a Window Station.');
+		$parent = $winEventIDs->tvEventIDs->InsertItem(-text => 'System.evtx');
+		$winEventIDs->tvEventIDs->InsertItem(-parent => $parent, -text => '56: The Terminal Server security layer detected an error in the protocol stream and has disconnected the client.');
+		$winEventIDs->tvEventIDs->InsertItem(-parent => $parent, -text => '9009: The Desktop Window Manager has exited with code (<X>).');
+	}
+  &isProcessReady(0);
+	
+}  #--- End setInput
+
+#--------------------------#
+sub btnCopyFromLive_Click
+#--------------------------#
+{
+	if (my $input = $win->tfInput->Text()) {
+		# Request admin rights to copy Event Logs in the current directory
+		if (not Win32::RunAsAdmin::check) { # It's not possile to open Event Logs on live system (require admin rights)
+			Win32::GUI::MessageBox($win, $STR{'warnAdmin'}, $STR{'Warning'}, 0x40030);
+		} else {
+			# Copy Event Logs in the current directory
+			if (my $systemELDir = "$ENV{'WINDIR'}\\Sysnative\\winevt\\Logs") {
+				my @eventLogs;
+				if ($win->chCopyFromLiveAll->Checked()) { # Get list of files
+					if (opendir(DIR,"$systemELDir\\")) {
+						while (my $file = readdir(DIR)) {
+							push(@eventLogs, $file) if $file =~ /\.evtx$/;
+						}
+						close(DIR);
+					}
+				} else {
+					push(@eventLogs, 'Security.evtx');
+					push(@eventLogs, 'System.evtx');
+					push(@eventLogs, 'Microsoft-Windows-TerminalServices-LocalSessionManager%4Operational.evtx');
+					push(@eventLogs, 'Microsoft-Windows-TerminalServices-RemoteConnectionManager%4Operational.evtx');
+					push(@eventLogs, 'Microsoft-Windows-RemoteDesktopServices-RdpCoreTS%4Operational.evtx');
+				}
+				# Copy each Event Logs files
+				my $nbrFiles = scalar(@eventLogs);
+				my $i = 0;
+				# Show progress
+				$win->pb->SetRange(0, $nbrFiles);
+				$win->pb->SetPos(0);
+				$win->pb->SetStep(1);
+				$win->lblPbCount->Text("0 / $nbrFiles");
+				foreach my $file (@eventLogs) {
+					$win->lblPbCurr->Text($STR{'Copy'}.' '.$file);
+					my $filePath = "$systemELDir\\$file";
+					if (-e $filePath and copy($filePath, "$input\\$file")) { $i++; }
+					# Progress
+					$win->lblPbCount->Text("$i / $nbrFiles");
+					$win->pb->StepIt();
+				}
+				Win32::GUI::MessageBox($win, $nbrFiles . ' ' . $STR{'fileCopied'} . '!', "RDP-Parser $VERSION", 0x40040);
+			}
+		}
+	}
+
+}  #--- End btnCopyFromLive_Click
+
+#--------------------------#
+sub rbFiltersAllEvents_Click { $win->btnFiltersEventIDs->Disable(); }
+sub rbFiltersSelEvents_Click { $win->btnFiltersEventIDs->Enable();	}
+#--------------------------#
+
+#--------------------------#
+sub btnFiltersEventIDs_Click
+#--------------------------#
+{
+	if (!$EVENTIDsSET) {
+		threads->create(sub { usleep(200000); &tvEventIDsCheckAll($winEventIDs->tvEventIDs->GetFirstVisible(), 1); });
+		$EVENTIDsSET = 1;
+	}
+  $winEventIDs->Center($win);
+  $winEventIDs->Show();	
+  return(1);
+
+}  #--- End btnFiltersEventIDs_Click
+
+#--------------------------#
+sub winEventIDs_Resize
+#--------------------------#
+{
+	# Resize and move controls
+  $winEventIDs->tvEventIDs->Resize($winEventIDs->ScaleWidth()-10, $winEventIDs->ScaleHeight()-65);
+	$winEventIDs->btnEventIDsOk->Move($winEventIDs->ScaleWidth()/2-30, $winEventIDs->ScaleHeight()-30);
+  
+}  #--- End winEventIDs_Resize
+
+#--------------------------#
+sub btnEventIDsCheckAll_Click
+#--------------------------#
+{
+	&tvEventIDsCheckAll($winEventIDs->tvEventIDs->GetFirstVisible(), 1);
+  
+}  #--- End btnEventIDsCheckAll_Click
+
+#--------------------------#
+sub btnEventIDsUnCheckAll_Click
+#--------------------------#
+{
+	&tvEventIDsCheckAll($winEventIDs->tvEventIDs->GetFirstVisible(), 0);
+  
+}  #--- End btnEventIDsUnCheckAll_Click
+
+#--------------------------#
+sub tvEventIDsCheckAll
+#--------------------------#
+{
+	my $parentNode = shift;
+	my $checkOpt   = shift;
+	$winEventIDs->tvEventIDs->ItemCheck($parentNode, $checkOpt);
+	my $nextNode = $winEventIDs->tvEventIDs->GetChild($parentNode);
+	$winEventIDs->tvEventIDs->ItemCheck($nextNode, $checkOpt);
+	while ($nextNode = $winEventIDs->tvEventIDs->GetNextSibling($nextNode)) { $winEventIDs->tvEventIDs->ItemCheck($nextNode, $checkOpt); }
+	if ($nextNode = $winEventIDs->tvEventIDs->GetNextSibling($parentNode)) { &tvEventIDsCheckAll($nextNode, $checkOpt); }
+  
+}  #--- End tvEventIDsCheckAll
+
+#--------------------------#
+sub tvEventIDs_Click
+#--------------------------#
+{
+  # Local variables
+  my ($X, $Y)      = Win32::GUI::GetCursorPos();
+  $X              -= $winEventIDs->tvEventIDs->AbsLeft();
+  $Y              -= $winEventIDs->tvEventIDs->AbsTop();
+  my $clickedNode  = $winEventIDs->tvEventIDs->HitTest($X, $Y);
+  # It's a parent, Checkbox Select/Unselect all
+  if ($X >= 25 and $X <= 37 and $clickedNode) {
+    $winEventIDs->tvEventIDs->SelectItem($clickedNode);
+    my %selItem = $winEventIDs->tvEventIDs->GetItem($clickedNode);
+    my $checked = $winEventIDs->tvEventIDs->ItemCheck($clickedNode);
+    # It's a parent
+    if (exists($selItem{'-parent'}) and !$selItem{'-parent'}) {
+      if (!$checked and
+        my $nextNode = $winEventIDs->tvEventIDs->GetChild($clickedNode)) {
+        $winEventIDs->tvEventIDs->ItemCheck($nextNode, 1);
+        while ($nextNode = $winEventIDs->tvEventIDs->GetNextSibling($nextNode)) {
+          $winEventIDs->tvEventIDs->ItemCheck($nextNode, 1);
+        }
+      } elsif ($nextNode = $winEventIDs->tvEventIDs->GetChild($clickedNode)) {
+        $winEventIDs->tvEventIDs->ItemCheck($nextNode, 0);
+        while ($nextNode = $winEventIDs->tvEventIDs->GetNextSibling($nextNode)) {
+          $winEventIDs->tvEventIDs->ItemCheck($nextNode, 0);
+        }
+      }
+    }
+  # It's a child
+  } elsif ($X >= 44 and $X <= 56 and $clickedNode) {
+    my $checked = 0;
+    $winEventIDs->tvEventIDs->SelectItem($clickedNode);
+    my %currItem = $winEventIDs->tvEventIDs->GetItem($clickedNode);
+    $checked = 1 if ($currItem{'-state'} == 4098 or $currItem{'-state'} == 4194 or $currItem{'-state'} == 8192);
+    if (my $parentNode = $winEventIDs->tvEventIDs->GetParent($clickedNode)) {
+      # Check category
+      if ($checked) { $winEventIDs->tvEventIDs->ItemCheck($parentNode, 1); }
+      # Unchecked item, uncheck category if no more checked items
+      else {
+        my $nextNode = $parentNode;
+        # Enumerate all childs
+        if (my $nextChildNode = $winEventIDs->tvEventIDs->GetChild($nextNode)) {
+          my %currItem = $winEventIDs->tvEventIDs->GetItem($nextChildNode);
+          $checked = 1 if ($currItem{'-state'} == 4098 or $currItem{'-state'} == 4194 or $currItem{'-state'} == 8192);
+          if (!$checked) {
+            while ($nextChildNode = $winEventIDs->tvEventIDs->GetNextSibling($nextChildNode)) {
+              %currItem = $winEventIDs->tvEventIDs->GetItem($nextChildNode);
+              $checked = 1 if ($currItem{'-state'} == 4098 or $currItem{'-state'} == 4194 or $currItem{'-state'} == 8192);
+            }
+          }
+        }
+        $winEventIDs->tvEventIDs->ItemCheck($parentNode, 0) if !$checked;
+      }
+    }
+  # No clicked node, uncheck all
+  } elsif (!$clickedNode) {
+    my $nextNode = $winEventIDs->tvEventIDs->GetRoot();
+    while ($nextNode) {
+      $winEventIDs->tvEventIDs->SetItem($nextNode, -selected => 0);
+      if (my $nextChildNode = $winEventIDs->tvEventIDs->GetChild($nextNode)) {
+        $winEventIDs->tvEventIDs->SetItem($nextChildNode, -selected => 0);
+        while ($nextChildNode = $winEventIDs->tvEventIDs->GetNextSibling($nextChildNode)) {
+          $winEventIDs->tvEventIDs->SetItem($nextChildNode, -selected => 0);
+        }
+      }
+      $nextNode = $winEventIDs->tvEventIDs->GetNextSibling($nextNode)
+    }
+  }
+  $winEventIDs->tvEventIDs->BringWindowToTop();
+  
+}  #--- End tvEventIDs_Click
+
+#--------------------------#
+sub btnEventIDsOk_Click { &winEventIDs_Terminate(); }
+#--------------------------#
+
+#--------------------------#
+sub winEventIDs_Terminate
+#--------------------------#
+{
+  $winEventIDs->Hide();
+  $win->Enable();
+  $win->SetForegroundWindow();
+  return(0);
+
+}  #--- End winEventIDs_Terminate
+
+#--------------------------#
+sub tfReportDir_Change
+#--------------------------#
+{
+  # Local variables
+  my $saveDir = $win->tfReportDir->Text();
+  # Remember
+  if ($saveDir and -d $saveDir) {
+    $CONFIG{'DIR_REPORT'} = $saveDir;
+    &saveConfig(\%CONFIG);
+  } else { # Invalid file or no file
+    delete($CONFIG{'DIR_REPORT'});
+    &saveConfig(\%CONFIG);
+    if ($saveDir) {
+      $win->tfReportDir->Text('');
+      Win32::GUI::MessageBox($win, $STR{'errNoValidDir'}, $STR{'Error'}, 0x40010) if $START;
+    }
+  }
+  &isProcessReady(0);
+
+}  #--- End tfReportDir_Change
+
+#--------------------------#
+sub cbReportFormat_Change
+#--------------------------#
+{
+  # Local variables
+  my $format = $win->cbReportFormat->GetCurSel();
+	if ($format == 1) { # Format is TXT
+		$win->chReportAddStats->Checked(0);
+		$win->chReportAddStats->Disable();
+	} else {
+		$win->chReportAddStats->Enable();
+		$win->chReportAddStats->Checked(1) if !exists($CONFIG{'REPORT_ADD_STATS'}) or $CONFIG{'REPORT_ADD_STATS'};
+	}
+  # Remember
+  $CONFIG{'FORMAT_REPORT'} = $format;
+  &saveConfig(\%CONFIG);
+
+}  #--- End cbReportFormat_Change
+
+#--------------------------#
+sub btnReportDir_Click
+#--------------------------#
+{
+  # Local variables
+  my $lastDir = $win->tfReportDir->Text();
+  my $dir;
+  # Show BrowseForFolder dialog window
+  if ($lastDir) {
+    my(@parts) = split(/\\/, $lastDir);
+    if (pop(@parts) =~ /\./) { while ($lastDir =~ /[^\\]$/) { chop($lastDir); } }
+    $dir = Win32::GUI::BrowseForFolder(-owner => $win, -title => $STR{'selDir'}.':', -folderonly => 1, -newui => 1, -directory  => $lastDir);
+  } else {
+    $dir = Win32::GUI::BrowseForFolder(-owner => $win, -title => $STR{'selDir'}.':', -folderonly => 1, -newui => 1);
+  }
+  # Selected folder
+  if ($dir and -d $dir) {
+    chop($dir) if $dir =~ /\\$/;
+    $win->tfReportDir->Text($dir);
+  }
+  return(1);
+  
+}  #--- End btnReportDir_Click
+
+#--------------------------#
+sub btnOpenReportDir_Click
+#--------------------------#
+{
+  # Local variables
+  if (my $outputDir = $win->tfReportDir->Text()) {
+		# Open Window Explorer
+		Win32::Process::Create(my $ProcessObj, "$ENV{'WINDIR'}\\explorer.exe", "explorer $outputDir", 0, NORMAL_PRIORITY_CLASS, ".") if -d $outputDir;
+	}
+
+}  #--- End btnOpenReportDir_Click
+
+#--------------------------#
+sub rbReportColsAll_Click { $win->btnReportCols->Disable(); }
+sub rbReportColsSel_Click { $win->btnReportCols->Enable();	}
+#--------------------------#
+
+#--------------------------#
+sub btnReportCols_Click
+#--------------------------#
+{
+  $winCols->Center($win);
+  $winCols->Show();	
+  return(1);
+
+}  #--- End btnReportCols_Click
+
+#--------------------------#
+sub btnColsOk_Click { &winCols_Terminate(); }
+#--------------------------#
+
+#--------------------------#
+sub winCols_Terminate
+#--------------------------#
+{
+  $winCols->Hide();
+  $win->Enable();
+  $win->SetForegroundWindow();
+  return(0);
+
+}  #--- End winCols_Terminate
+
+#--------------------------#
+sub chReportIPsOnly_Click
+#--------------------------#
+{
+  # Save the choice
+  if ($win->chReportIPsOnly->Checked()) {
+    $CONFIG{'REPORT_IP_ONLY'} = 1;
+    &saveConfig(\%CONFIG);
+  } else {
+    $CONFIG{'REPORT_IP_ONLY'} = 0;
+    &saveConfig(\%CONFIG);
+  }
+
+}  #--- End chReportIPsOnly_Click
+
+#--------------------------#
+sub chReportDataInline_Click
+#--------------------------#
+{
+  # Save the choice
+  if ($win->chReportDataInline->Checked()) {
+    $CONFIG{'REPORT_DATA_INLINE'} = 1;
+    &saveConfig(\%CONFIG);
+  } else {
+    $CONFIG{'REPORT_DATA_INLINE'} = 0;
+    &saveConfig(\%CONFIG);
+  }
+
+}  #--- End chReportDataInline_Click
+
+#--------------------------#
+sub cbOutputTZ_Change
+#--------------------------#
+{
+  # Remember
+  $CONFIG{'OUTPUT_TIMEZONE'} = $win->cbOutputTZ->GetCurSel();
+  &saveConfig(\%CONFIG);
+  
+}  #--- End cbOutputTZ_Change
+
+#--------------------------#
+sub chReportAddStats_Click
+#--------------------------#
+{
+  # Save the choice
+  if ($win->chReportAddStats->Checked()) {
+    $CONFIG{'REPORT_ADD_STATS'} = 1;
+    &saveConfig(\%CONFIG);
+  } else {
+    $CONFIG{'REPORT_ADD_STATS'} = 0;
+    &saveConfig(\%CONFIG);
+  }
+
+}  #--- End chReportAddStats_Click
+
+#--------------------------#
+sub chOpenReport_Click
+#--------------------------#
+{
+  # Save the choice
+  if ($win->chOpenReport->Checked()) {
+    $CONFIG{'AUTO_OPEN_REPORT'} = 1;
+    &saveConfig(\%CONFIG);
+  } else {
+    $CONFIG{'AUTO_OPEN_REPORT'} = 0;
+    &saveConfig(\%CONFIG);
+  }
+
+}  #--- End chOpenReport_Click
+
+#--------------------------#
+sub isProcessReady
+#--------------------------#
+{
+  # Local variables
+  my $confirm = shift;
+  my $nextStep;
+  my $input = $win->tfInput->Text();
+  # Check Input
+  if (!$win->tfInput->Text()) {
+    $nextStep = $STR{'selectInput'};
+		$win->btnCopyFromLive->Disable();
+	} else { $win->btnCopyFromLive->Enable();	}
+  # Check Report path
+    $nextStep = $STR{'selectReport'} if !$win->tfReportDir->Text();
+  # Return an error message or enable the button
+  if ($nextStep) {
+    $win->btnProcess->Disable();
+    $win->lblNotReady->Show();
+    Win32::GUI::MessageBox($win, "$STR{'notReady'}?\n\n$STR{'nextStep'}: $nextStep", $STR{'notReady'}, 0x40040) if $confirm;
+  } else {
+    $win->btnProcess->Enable();
+    $win->lblNotReady->Hide();
+  }
+
+}  #--- End isProcessReady
+
+#--------------------------#
+sub btnProcess_Click
+#--------------------------#
+{
+  # Avoid new thread
+  if ($THR_PROCESS and $THR_PROCESS->is_running()) { Win32::GUI::MessageBox($win, $STR{'processRunning'}, $STR{'Error'}, 0x40010); }
+  else {
+    $THR_PROCESS = threads->create(sub {
+      # Thread cancel signal handler
+      $SIG{'KILL'} = sub {
+        $win->lblPbCurr->Text('');
+        $win->pb->SetPos(0);
+        $win->lblPbCount->Text('');
+        $win->lblPbCurr->Hide();
+        $win->pb->Hide();
+        $win->lblPbCount->Hide();
+        $win->ChangeCursor($ARROW);
+        threads->exit();
+      };
+      # Thread die signal handler
+      $SIG{__DIE__} = sub {
+				&debug($_[0]) if $winConfig->chEnableLogging->Checked();
+        my $errMsg = (split(/ at /, $_[0]))[0];
+        $errMsg =~ s/[\t\r\n]/ /g;
+        $win->lblPbCurr->Text('');
+        $win->pb->SetPos(0);
+        $win->lblPbCount->Text('');
+        $win->lblPbCurr->Hide();
+        $win->pb->Hide();
+        $win->lblPbCount->Hide();
+        $win->ChangeCursor($ARROW);
+        Win32::GUI::MessageBox($win, "$STR{'errorMsg'}: $errMsg", $STR{'Error'}, 0x40010);
+        threads->exit();
+      };
+      # Show progress
+      $win->lblPbCurr->Text('');
+      $win->pb->SetPos(0);
+      $win->lblPbCount->Text('');
+      $win->lblPbCurr->Show();
+      $win->pb->Show();
+      $win->lblPbCount->Show();
+      $win->ChangeCursor($HOURGLASS);
+			# Get filters
+			my $refFilters = &getFilters();
+			# Get files
+			my %files      = &getFiles($refFilters);
+			# Parse EventLogs
+			my %events;
+			my %stats;
+			if (my $nbrFiles = scalar(keys %files)) {
+				my $i = 1;
+				foreach my $log (keys %files) {
+					$win->lblPbCurr->Text("[$i/$nbrFiles] " . $STR{'Parsing'} . ' ' . $log . '...');
+					if ($win->lblOldLogFlag->Text) {
+						&parseOldEventLog($log, $files{$log}, $refFilters, \%events, \%stats);
+					} else {
+						&parseEventLog(   $log, $files{$log}, $refFilters, \%events, \%stats);
+					}
+					$i++;
+				}
+			}
+			# Write the report
+			my $nbrActivities = scalar(keys %events);
+			if ($nbrActivities) {
+				my $reportFormat = $win->cbReportFormat->GetString($win->cbReportFormat->GetCurSel());
+				my $dateStr	= &date(time);
+				$dateStr		=~ s/:/-/g;
+				$dateStr		=~ s/ /_/g;
+				my $report  = $win->tfReportDir->Text() . '\report_' . $dateStr;
+				$report    .= '.' . lc($reportFormat);
+				$win->lblPbCurr->Text($STR{'creatingReport'} . '...');
+				$win->pb->SetRange(0, $nbrActivities);
+				$win->pb->SetPos(0);
+				if 		($reportFormat eq 'XLSX')	{ &reportXLSX($report, $nbrActivities, \%events, \%stats); }
+				elsif ($reportFormat eq 'HTML')	{ &reportHTML($report, $nbrActivities, \%events, \%stats); }
+				else 												    { &reportTXT( $report, $nbrActivities, \%events, \%stats); }
+				$win->ShellExecute('open', $report,'','',1) if $win->chReportOpen->Checked() and $report and -e $report;
+			} else { Win32::GUI::MessageBox($win, $STR{'NoRDPFound'}, "RDP-Parser $VERSION", 0x40040); }
+      # Progress
+      $win->lblPbCurr->Text('');
+      $win->pb->SetPos(0);
+      $win->lblPbCount->Text('');
+      $win->lblPbCurr->Hide();
+      $win->pb->Hide();
+      $win->lblPbCount->Hide();   
+      $win->ChangeCursor($ARROW);
+    });
+  }
+	
+}  #--- End btnProcess_Click
+
+#--------------------------#
+sub getFilters
+#--------------------------#
+{
+  # Local variables
+	my %filters;
+	# Events
+	if ($win->rbFiltersSelEvents->Checked()) {
+		$filters{event} = 'FilterEvents';
+		# Get selected event IDs
+		&getCheckedEventIDsAll($winEventIDs->tvEventIDs->GetFirstVisible(), \%filters);
+	}
+	# IP address
+	if    ($win->rbFiltersPublicIPs->Checked()) { $filters{ip} = 'PublicIPs';	}
+	elsif ($win->rbFiltersAllIPs->Checked()   ) { $filters{ip} = 'AllIPs';	  }
+	# Dates
+	if (!$win->dtFiltersDate1->IsNone()) {
+		my ($d1, $m1, $y1) = $win->dtFiltersDate1->GetDate();
+		my ($h1, $min1, $s1) = 0;
+		if (!$win->dtFiltersTime1->IsNone()) {
+			($h1, $min1, $s1) = $win->dtFiltersTime1->GetTime();
+			$filters{date1time} = 1 if $filters{date1opt} eq $STR{'Equal'};
+		}
+		$filters{date1}    = timelocal($s1, $min1, $h1, $d1, --$m1, $y1);
+		$filters{date1opt} = $win->cbFiltersDate1->GetString($win->cbFiltersDate1->GetCurSel());
+	}
+	if (!$win->dtFiltersDate2->IsNone() and (!$filters{date1opt} or $filters{date1opt} ne $STR{'Equal'})) {
+		my ($d2, $m2, $y2) = $win->dtFiltersDate2->GetDate();
+		my ($h2, $min2, $s2) = 0;
+		if (!$win->dtFiltersTime2->IsNone()) { ($h2, $min2, $s2) = $win->dtFiltersTime2->GetTime(); }
+		$filters{date2} = timelocal($s2, $min2, $h2, $d2, $m2, $y2);
+	}
+	# Keyword(s)
+	if (my $keywordStr = $win->tfFiltersKeyword->Text() or $win->chFiltersKLogType10->Checked() or $win->chFiltersKRDPTcp->Checked()) {
+		$filters{keyword}     = $keywordStr if $keywordStr;
+		if ($win->chFiltersKLogType10->Checked()) {
+			$filters{keyword} .= ';' if $filters{keyword};
+			$filters{keyword} .= 'Logon Type: 10';
+		}
+		if ($win->chFiltersKRDPTcp->Checked()) {
+			$filters{keyword} .= ';' if $filters{keyword};
+			$filters{keyword} .= 'RDP-Tcp';
+		}
+		$filters{keywordCase} = 1 if $win->chFiltersKeywordCase->Checked();
+	}
+	return(\%filters);
+	
+}  #--- End getFilters
+
+#--------------------------#
+sub getCheckedEventIDsAll
+#--------------------------#
+{
+	my $parentNode = shift;
+	my $refFilters = shift;
+	my $checked = $winEventIDs->tvEventIDs->ItemCheck($parentNode);
+	if ($checked) {
+		my %infos     = $winEventIDs->tvEventIDs->GetItem($parentNode);
+		my $eventFile = $infos{'-text'};
+		if (!exists($$refFilters{eventfiles}) or !exists($$refFilters{eventfiles}{$eventFile})) {
+			$$refFilters{eventfiles}{$eventFile} = 1;
+		}
+		my $nextNode = $winEventIDs->tvEventIDs->GetChild($parentNode);
+		$checked = $winEventIDs->tvEventIDs->ItemCheck($nextNode);
+		if ($checked) {
+			%infos = $winEventIDs->tvEventIDs->GetItem($nextNode);
+			if (scalar(keys %infos) and $infos{'-text'} =~ /^(\d+): (.+)/) { $$refFilters{eventids}{$1} = $2; }
+		}
+		while ($nextNode = $winEventIDs->tvEventIDs->GetNextSibling($nextNode)) {
+			$checked = $winEventIDs->tvEventIDs->ItemCheck($nextNode);
+			if ($checked) {
+				%infos = $winEventIDs->tvEventIDs->GetItem($nextNode);
+				if (scalar(keys %infos) and $infos{'-text'} =~ /^(\d+): (.+)/) { $$refFilters{eventids}{$1} = $2; }
+			}
+		}
+	}
+	if (my $nextNode = $winEventIDs->tvEventIDs->GetNextSibling($parentNode)) { &getCheckedEventIDsAll($nextNode, $refFilters); }
+  
+}  #--- End getCheckedEventIDsAll
+
+#--------------------------#
+sub getFiles
+#--------------------------#
+{
+  # Local variables
+	my $refFilters = shift;
+	my $input      = $win->tfInput->Text();
+	my %files;
+	# Browse the input directory and check for existing EventLogs
+	if (opendir(DIR,"$input\\")) {
+		while (my $file = readdir(DIR)) {
+			my $filePath = "$input\\$file";
+			if			($file eq 'Security.evtx') {
+				if (exists($$refFilters{eventfiles})) {
+					if (exists($$refFilters{eventfiles}{'Security.evtx'})) {
+						$files{'Security.evtx'} = $filePath;
+					}
+				} else { $files{'Security.evtx'} = $filePath; }
+			} elsif ($file eq 'Microsoft-Windows-TerminalServices-LocalSessionManager%4Operational.evtx') {
+				if (exists($$refFilters{eventfiles})) {
+					if (exists($$refFilters{eventfiles}{'Microsoft-Windows-TerminalServices-LocalSessionManager%4Operational.evtx'})) {
+						$files{'Microsoft-Windows-TerminalServices-LocalSessionManager%4Operational.evtx'} = $filePath;
+					}
+				} else { $files{'Microsoft-Windows-TerminalServices-LocalSessionManager%4Operational.evtx'} = $filePath; }
+			} elsif ($file eq 'Microsoft-Windows-TerminalServices-RemoteConnectionManager%4Operational.evtx') {
+				if (exists($$refFilters{eventfiles})) {
+					if (exists($$refFilters{eventfiles}{'Microsoft-Windows-TerminalServices-RemoteConnectionManager%4Operational.evtx'})) {
+						$files{'Microsoft-Windows-TerminalServices-RemoteConnectionManager%4Operational.evtx'} = $filePath;
+					}
+				} else { $files{'Microsoft-Windows-TerminalServices-RemoteConnectionManager%4Operational.evtx'} = $filePath; }
+			} elsif ($file eq 'Microsoft-Windows-RemoteDesktopServices-RdpCoreTS%4Operational.evtx') {
+				if (exists($$refFilters{eventfiles})) {
+					if (exists($$refFilters{eventfiles}{'Microsoft-Windows-RemoteDesktopServices-RdpCoreTS%4Operational.evtx'})) {
+						$files{'Microsoft-Windows-RemoteDesktopServices-RdpCoreTS%4Operational.evtx'} = $filePath;
+					}
+				} else { $files{'Microsoft-Windows-RemoteDesktopServices-RdpCoreTS%4Operational.evtx'} = $filePath; }
+			} elsif ($file eq 'System.evtx') {
+				if (exists($$refFilters{eventfiles})) {
+					if (exists($$refFilters{eventfiles}{'System.evtx'})) {
+						$files{'System.evtx'} = $filePath;
+					}
+				} else { $files{'System.evtx'} = $filePath; }
+			} elsif ($file =~ /security.evt$/) {
+				if (exists($$refFilters{eventfiles})) {
+					if (exists($$refFilters{eventfiles}{'security.evt'})) {
+						$files{'security.evt'} = $filePath;
+					}
+				} else { $files{'security.evt'} = $filePath; }
+			} elsif ($file =~ /SecEvent.Evt$/) {
+				if (exists($$refFilters{eventfiles})) {
+					if (exists($$refFilters{eventfiles}{'SecEvent.Evt'})) {
+						$files{'SecEvent.Evt'} = $filePath;
+					}
+				} else { $files{'SecEvent.Evt'} = $filePath; }
+			}
+		}
+		closedir(DIR);
+	}
+	return(%files);
+
+}  #--- End getFiles
+
+#--------------------------#
+sub parseEventLog
+#--------------------------#
+{
+	# Local variables
+	my ($log, $file, $refFilters, $refEvents, $refStats) = @_;
+	my %eventIDs;
+	my $nbrActivities = 0;
+	if ($$refFilters{event} and $$refFilters{event} eq 'FilterEvents' and exists($$refFilters{eventids})) {
+		foreach my $id (keys %{$$refFilters{eventids}}) { $eventIDs{$id} = $$refFilters{eventids}{$id}; }
+	} else {
+		if     ($log eq 'Security.evtx') {
+			$eventIDs{4624} = 'An account was successfully logged on';
+			$eventIDs{4625} = 'An account failed to log on';
+			$eventIDs{4634} = 'An account was logged off';
+			$eventIDs{4647} = 'User initiated logoff';
+			$eventIDs{4778} = 'A session was reconnected to a Window Station';
+			$eventIDs{4779} = 'A session was disconnected from a Window Station';
+		} elsif($log eq 'System.evtx') {
+			$eventIDs{56} 	= 'The Terminal Server security layer detected an error in the protocol stream and has disconnected the client.';
+			$eventIDs{9009} = 'The Desktop Window Manager has exited with code (<X>).'; # Must find Instance ID for this one
+		} elsif($log eq 'Microsoft-Windows-TerminalServices-LocalSessionManager%4Operational.evtx') {
+			$eventIDs{21} 	= 'Remote Desktop Services: Session logon succeeded';
+			$eventIDs{22} 	= 'Remote Desktop Services: Shell start notification received';
+			$eventIDs{23} 	= 'Remote Desktop Services: Session logoff succeeded';
+			$eventIDs{24} 	= 'Remote Desktop Services: Session has been disconnected';
+			$eventIDs{25} 	= 'Remote Desktop Services: Session reconnection succeeded';
+			$eventIDs{39} 	= 'Session <X> has been disconnected by session <Y>';
+			$eventIDs{40} 	= 'Session <X> has been disconnected, reason code <Z>';
+		} elsif($log eq 'Microsoft-Windows-RemoteDesktopServices-RdpCoreTS%4Operational.evtx') {
+			$eventIDs{131} 	= 'Remote Desktop Services: An account failed to log on';
+			$eventIDs{140} 	= 'Remote Desktop Services: An account failed to log on with unknown username';
+		} elsif($log eq 'Microsoft-Windows-TerminalServices-RemoteConnectionManager%4Operational.evtx') {
+			$eventIDs{261}	= 'Listener RDP-Tcp received a connection';
+			$eventIDs{1149} = 'User authentication succeeded';
+		}
+	}
+	my %eventTypes = (
+		0		=> 'Success',
+		1		=> 'Error',
+		2		=> 'Warning',
+		4		=> 'Information',
+		8 	=> 'Audit Success',
+		16	=> 'Audit Failure',
+	);
+	my %logonFailures = (
+		'0xc000005E' => 'There are currently no logon servers available to service the logon request.',
+		'0xc0000064' => 'user name does not exist',
+		'0xc000006A' => 'user name is correct but the password is wrong',
+		'0xc000006D' => 'This is either due to a bad username or authentication information',
+		'0xc000006E' => 'Unknown user name or bad password.',
+		'0xc000006F' => 'user tried to logon outside his day of week or time of day restrictions',
+		'0xc0000070' => 'workstation restriction, or Authentication Policy Silo violation (look for event ID 4820 on domain controller)',
+		'0xc0000071' => 'expired password',
+		'0xc0000072' => 'account is currently disabled',
+		'0xc00000DC' => 'Indicates the Sam Server was in the wrong state to perform the desired operation.',
+		'0xc0000133' => 'clocks between DC and other computer too far out of sync',
+		'0xc000015b' => 'The user has not been granted the requested logon type (aka logon right) at this machine',
+		'0xc000018C' => 'The logon request failed because the trust relationship between the primary domain and the trusted domain failed.',
+		'0xc0000192' => 'An attempt was made to logon, but the netlogon service was not started.',
+		'0xc0000193' => 'account expiration',
+		'0xc0000224' => 'user is required to change password at next logon',
+		'0xc0000225' => 'evidently a bug in Windows and not a risk',
+		'0xc0000234' => 'user is currently locked out',
+		'0xc0000413' => 'Logon Failure: The machine you are logging onto is protected by an authentication firewall. The specified account is not allowed to authenticate to the machine.',
+	);
+	my %disconnectCode = (
+		1 => 'The disconnection was initiated by an administrative tool on the server in another session.',
+		2 => 'The disconnection was due to a forced logoff initiated by an administrative tool on the server in another session.',
+		3 => 'The idle session limit timer on the server has elapsed.',
+		4 => 'The active session limit timer on the server has elapsed.',
+		5 => 'Another user connected to the server, forcing the disconnection of the current connection.',
+		6 => 'The server ran out of available memory resources.',
+		7 => 'The server denied the connection.',
+		9 => 'The user cannot connect to the server due to insufficient access privileges.',
+		10 => 'The server does not accept saved user credentials and requires that the user enter their credentials for each connection.',
+		11 => 'The disconnection was initiated by the user disconnecting his or her session on the server or by an administrative tool on the server.',
+		12 => 'The disconnection was initiated by the user logging off his or her session on the server.',
+	);
+	# Date 2
+	my $dateBefore;
+	if (exists($$refFilters{date1opt}) and $$refFilters{date1opt} eq $STR{'Equal'} and !exists($$refFilters{date1time})) {
+		$dateBefore = $$refFilters{date1} + 86400; # Add one day
+	} elsif (exists($$refFilters{date2})) { $dateBefore = $$refFilters{date2}; }
+	# Keywords
+	my @keywords;
+	if (my $keywordStr = $$refFilters{keyword}) {
+		if ($keywordStr =~ /;/) { @keywords = split(/;/, $keywordStr); }
+		else                    { push(@keywords, $keywordStr); }
+	}
+	my $nbrKeywords = @keywords;
+	# Stats
+	my %computer;
+	my %system;
+	# Parse the log
+	if (my $parser = Win32::EventLog->new($file)) {
+		my ($firstUT, $lastUT, $nbrRecs, $base);
+		my $x = 0;
+		$parser->GetNumber($nbrRecs);
+		$parser->GetOldest($base);
+		# Progress
+		$win->lblPbCount->Text("$x/$nbrRecs");
+		$win->pb->SetRange(0, $nbrRecs);
+		$win->pb->SetPos(0);
+		$win->pb->SetStep(1);
+		while ($x < $nbrRecs) {
+			my ($hashRef, $ip);
+			my $keep = 1;
+			if ($parser->Read(EVENTLOG_FORWARDS_READ|EVENTLOG_SEEK_READ,$base+$x,$hashRef)) {
+				Win32::EventLog::GetMessageText($hashRef);
+				$lastUT  = $hashRef->{TimeGenerated};
+				$firstUT = $lastUT if !$firstUT;
+				if (my $computerName = $hashRef->{Computer}) {
+					if (exists($computer{$computerName})) { $computer{$computerName}++;   }
+					else                                  { $computer{$computerName} = 1; }
+				}
+				if ($log eq 'System.evtx' and $hashRef->{EventID} == -2147477639) { # Event ID 6009
+					my $systemStr = $hashRef->{Message};
+					$systemStr =~ s/\r\n//;
+					if (exists($system{$systemStr})) { $system{$systemStr}++;   }
+					else                             { $system{$systemStr} = 1; }
+				}
+				# Match EventID filter
+				$hashRef->{EventID} =~ s/-1073086408/56/; # Instance ID to Event ID (System.evtx)
+				if (exists($eventIDs{$hashRef->{EventID}})) {
+					# Match Dates filter
+					if (exists($$refFilters{date1opt})) {
+						if ($$refFilters{date1opt} eq $STR{'Equal'}) {
+							if ((!$dateBefore and $lastUT != $$refFilters{date1}) or # Must be the exact same date and time
+									($dateBefore and ($lastUT < $$refFilters{date1} or $lastUT > $dateBefore))) { # Must be the same day as date1
+								$keep = 0;
+							}
+						} elsif ($lastUT < $$refFilters{date1}) { $keep = 0; } # Must be after date1
+					}
+					if ($keep) {
+						if (exists($$refFilters{date2}) and $lastUT > $dateBefore) { $keep = 0; } # Must be before date2
+						else {
+							# Match IP address filter
+							if (exists($$refFilters{ip})) {
+								if (($hashRef->{Strings} and ($hashRef->{Strings} =~ /(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/ or $hashRef->{Strings} =~ /($IPv6_re)/) or
+										($hashRef->{Message} and ($hashRef->{Message} =~ /(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/ or $hashRef->{Message} =~ /($IPv6_re)/)))) {
+									$ip = $1;
+									if ($$refFilters{ip} eq 'PublicIPs' and $ip =~ /(?:^127\.|^10\.|^172\.1[6-9]\.|^172\.2[0-9]\.|^172\.3[0-1]\.|^192\.168\.|^::1|^fe80)/) {
+										$keep = 0; # Not a public IP address
+									}
+								} else { $keep = 0; } # No IP in details
+							}
+						}
+						if ($keep) {
+							# Keep the event
+							my $eventID;
+							my $eventInd = $hashRef->{TimeGenerated}.'-'.$hashRef->{RecordNumber};
+							foreach my $name (%{$hashRef}) {
+								if ($name and defined($hashRef->{$name}) and $hashRef->{$name}) {
+									my $value;
+									if 		($name eq 'EventID'  ) { $value	 = $hashRef->{$name} . ' - ' . $eventIDs{$hashRef->{$name}}; $eventID = $hashRef->{$name}; }
+									elsif ($name eq 'EventType') { $value	 = $hashRef->{$name} . ' - ' . $eventTypes{$hashRef->{$name}}; }
+									elsif ($name eq 'Strings') {
+										$value = &formatEventStrings($hashRef->{$name}, $eventID, \%logonFailures, \%disconnectCode) if !$value;
+									} else { $value = $hashRef->{$name}; }
+									$$refEvents{$eventInd}{$name} = $value if $value;
+								}
+							}
+							$$refEvents{$eventInd}{Strings} = $$refEvents{$eventInd}{Message} if $hashRef->{EventID} == 56 and !$$refEvents{$eventInd}{Strings};
+							# Match keywords
+							if ($nbrKeywords) {
+								if ($$refEvents{$eventInd}{Strings}) {
+									my $match = 0;
+									foreach my $word (@keywords) {
+										if ((exists($$refFilters{keywordCase}) and $$refEvents{$eventInd}{Strings} =~ /$word/i) or
+												$$refEvents{$eventInd}{Strings} =~ /$word/) {
+											$match++;
+											last;
+										}
+									}
+									if (!$match) { delete $$refEvents{$eventInd}; $keep = 0; }; # No keyword was found in details
+								} else { delete $$refEvents{$eventInd}; $keep = 0; } # No details
+							}
+							if ($keep) {
+								# Keep IP only
+								if ($win->chReportIPsOnly->Checked() and $$refEvents{$eventInd} and $$refEvents{$eventInd}{Strings}) {
+									if (!$ip and ($$refEvents{$eventInd}{Strings} =~ /(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/ or
+																$$refEvents{$eventInd}{Strings} =~ /($IPv6_re)/)) { $ip = $1; }
+									$$refEvents{$eventInd}{Strings} = $ip if $ip;
+								}
+								$nbrActivities++;
+							}
+						}
+					}
+				}
+			}
+			$x++;
+			$win->lblPbCount->Text("$x/$nbrRecs");
+			$win->pb->StepIt();
+		}
+		# Add stats
+		$$refStats{$log}{first}   = $firstUT;
+		$$refStats{$log}{last}    = $lastUT;
+		$$refStats{$log}{nbrRecs} = $nbrRecs;
+		foreach my $c (sort { $computer{$b} <=> $computer{$a} } keys %computer) {
+			$$refStats{computer} = $c;
+			last;
+		}
+		if ($log eq 'System.evtx') {
+      foreach my $c (sort { $system{$b} <=> $system{$a} } keys %system) {
+				$$refStats{system} = $c;
+				last;
+			}
+		}
+	}
+	return($nbrActivities);
+	
+}   #--- End parseEventLog
+
+#--------------------------#
+sub formatEventStrings
+#--------------------------#
+{
+	# Local variables
+	my ($eventStr, $eventID, $refLogonFailures, $refDisconnectCode) = @_;
+	my @strings = split(/\0+/, $eventStr);
+	my $formatedString;
+	if ($eventID < 30) {
+		$formatedString .= "User: $strings[0]\r\n";
+		$formatedString .= "Session ID: $strings[1]\r\n";
+		$formatedString .= "Source Network Address:	$strings[2]" if $eventID != 23;
+	} elsif ($eventID == 39) {
+		$formatedString .= "Session ID: $strings[0]\r\n";
+		$formatedString .= "Session ID: $strings[1]\r\n";
+	} elsif ($eventID == 40) {
+		$formatedString .= "Session ID: $strings[0]\r\n";
+		if ($strings[1] and $$refDisconnectCode{$strings[1]}) {
+			$formatedString .= "Reason: $$refDisconnectCode{$strings[1]}\r\n";
+		}
+		elsif ($strings[1]) { $formatedString .= "Reason code: $strings[1]\r\n"; }
+		else                { $formatedString .= "Reason code: 0\r\n";           }
+	} elsif ($eventID == 1149) {
+		$formatedString .= "Remote Desktop Services: User authentication succeeded:\r\n";
+		$formatedString .= "User:	$strings[0]\r\n";
+		my $row = 1;
+		if ($strings[2]) { $formatedString .= "Domain: $strings[$row]\r\n"; $row++; }
+		$formatedString .= "Source Network Address:	$strings[$row]\r\n";
+	} elsif ($eventID == 4648) {
+		$formatedString .= "Subject:\r\n";
+		$formatedString .= "Security ID: $strings[0]\r\n";
+		$formatedString .= "Account Name: $strings[1]\r\n";
+		$formatedString .= "Account Domain:	$strings[2]\r\n";
+		$formatedString .= "Logon ID: $strings[3]\r\n";
+		$formatedString .= "Logon GUID:	$strings[4]\r\n\r\n";
+		$formatedString .= "Account Whose Credentials Were Used:\r\n";
+		$formatedString .= "Account Name: $strings[5]\r\n";
+		$formatedString .= "Account Domain:	$strings[6]\r\n";
+		$formatedString .= "Logon GUID:	$strings[7]\r\n\r\n";
+		$formatedString .= "Target Server:\r\n";
+		$formatedString .= "Target Server Name:	$strings[8]\r\n";
+		$formatedString .= "Additional Information:	$strings[9]\r\n\r\n";
+		$formatedString .= "Process Information:\r\n";
+		$formatedString .= "Process ID:	$strings[10]\r\n";
+		$formatedString .= "Process Name: $strings[11]\r\n\r\n";
+		$formatedString .= "Network Information:\r\n";
+		$formatedString .= "Network Address: $strings[12]\r\n";
+		$formatedString .= "Port: $strings[13]";
+	} elsif ($eventID == 4624) {
+		$formatedString .= "Subject:\r\n";
+		$formatedString .= "Security ID: $strings[0]\r\n";
+		$formatedString .= "Account Name: $strings[1]\r\n";
+		$formatedString .= "Account Domain:	$strings[2]\r\n";
+		$formatedString .= "Logon ID: $strings[3]\r\n";
+		$formatedString .= "Logon GUID:	$strings[4]\r\n\r\n";
+		$formatedString .= "Account Whose Credentials Were Used:\r\n";
+		$formatedString .= "Account Name: $strings[5]\r\n";
+		$formatedString .= "Account Domain:	$strings[6]\r\n";
+		$formatedString .= "Logon ID: $strings[7]\r\n\r\n";
+		$formatedString .= "Logon Type: $strings[8]\r\n";
+		$formatedString .= "Detailed Authentication Information:\r\n";
+		$formatedString .= "Logon Process: $strings[9]\r\n";
+		$formatedString .= "Authentication Package: $strings[10]\r\n";
+		my $row = 11;
+		if ($strings[$row] !~ /^{/) { $formatedString .= "Account Domain: $strings[$row]\r\n"; $row++; }
+		$formatedString .= "Logon GUID: $strings[$row]\r\n"; $row++;
+		$formatedString .= "Transited Services: $strings[$row]\r\n"; $row++;
+		$formatedString .= "Package Name (NTLM only): $strings[$row]\r\n"; $row++;
+		$formatedString .= "Key Length: $strings[$row]\r\n\r\n"; $row++;
+		$formatedString .= "Process Information:\r\n";
+		$formatedString .= "Process ID: $strings[$row]\r\n"; $row++;
+		$formatedString .= "Process Name: $strings[$row]\r\n\r\n"; $row++;
+		$formatedString .= "Network Information:\r\n";
+		$formatedString .= "Network Address: $strings[$row]\r\n"; $row++;
+		if ($strings[$row]) { $formatedString .= "Port: $strings[$row]"; }
+		else								{ $formatedString .= "Port: -";							 }
+	} elsif ($eventID == 4625) {
+		$formatedString .= "Subject:\r\n";
+		$formatedString .= "Security ID: $strings[0]\r\n";
+		$formatedString .= "Account Name: $strings[1]\r\n";
+		$formatedString .= "Account Domain:	$strings[2]\r\n";
+		$formatedString .= "Logon ID: $strings[3]\r\n";
+		$formatedString .= "Account For Which Logon Failed:\r\n";
+		$formatedString .= "Security ID: $strings[4]\r\n";
+		$formatedString .= "Account Name: $strings[5]\r\n";
+		$formatedString .= "Account Domain:	\r\n";
+		my $failReason;
+		if    (exists($$refLogonFailures{$strings[6]})) { $failReason = $$refLogonFailures{$strings[6]}; }
+		elsif (exists($$refLogonFailures{$strings[8]})) { $failReason = $$refLogonFailures{$strings[8]}; }
+		$formatedString .= "Failure Information:\r\n";
+		$formatedString .= "Failure Reason: $failReason\r\n" if $failReason;
+		$formatedString .= "Status: $strings[6]\r\n";
+		$formatedString .= "Sub Status:	$strings[8]\r\n";
+		$formatedString .= "Logon Type: $strings[9]\r\n";
+		$formatedString .= "Logon Process: $strings[10]\r\n";
+		$formatedString .= "Authentication Package: $strings[11]\r\n";
+		my $row = 12;
+		if ($strings[$row] !~ /^-/) { $formatedString .= "Workstation Name: $strings[$row]\r\n"; $row++; }
+		$formatedString .= "Transited Services: $strings[$row]\r\n"; $row++;
+		$formatedString .= "Package Name (NTLM only): $strings[$row]\r\n"; $row++;
+		$formatedString .= "Key Length: $strings[$row]\r\n"; $row++;
+		$formatedString .= "Caller Process ID: $strings[$row]\r\n"; $row++;
+		$formatedString .= "Caller Process Name: $strings[$row]\r\n"; $row++;
+		$formatedString .= "Source Network Address: $strings[$row]\r\n"; $row++;
+		$formatedString .= "Source Port: $strings[$row]";
+	} elsif ($eventID == 4647) {
+		$formatedString .= "Security ID:	$strings[0]\r\n";
+		$formatedString .= "Account Name: $strings[1]\r\n";
+		$formatedString .= "Account Domain:	$strings[2]\r\n";
+		$formatedString .= "Logon ID: $strings[3]";
+	} elsif ($eventID == 4634) {
+		$formatedString .= "Security ID:	$strings[0]\r\n";
+		$formatedString .= "Account Name: $strings[1]\r\n";
+		$formatedString .= "Account Domain:	$strings[2]\r\n";
+		$formatedString .= "Logon ID: $strings[3]\r\n";
+		$formatedString .= "Logon Type: $strings[4]";
+	} else {
+		my $i = 0;
+		foreach (@strings) { chomp($strings[$i]); $formatedString .= "$strings[$i]\r\n"; $i++; }
+	}
+	return($formatedString);
+	
+}   #--- End formatEventStrings
+
+#--------------------------#
+sub parseOldEventLog
+#--------------------------#
+{
+	# Local variables
+	my ($log, $file, $refFilters, $refEvents, $refStats) = @_;
+	my %eventIDs;
+	my $nbrActivities = 0;
+	if ($$refFilters{event} and $$refFilters{event} eq 'FilterEvents' and exists($$refFilters{eventids})) {
+		foreach my $id (keys %{$$refFilters{eventids}}) { $eventIDs{$id} = $$refFilters{eventids}{$id}; }
+	} else {
+		$eventIDs{528} = 'Successful Logon',
+		$eventIDs{529} = 'Logon Failure - Unknown user name or bad password',
+		$eventIDs{530} = 'Logon Failure - Account logon time restriction violation',
+		$eventIDs{531} = 'Logon Failure - Account currently disabled',
+		$eventIDs{532} = 'Logon Failure - The specified user account has expired',
+		$eventIDs{533} = 'Logon Failure - User not allowed to logon at this computer',
+		$eventIDs{534} = 'Logon Failure - The user has not been granted the requested logon type at this machine',
+		$eventIDs{535} = "Logon Failure - The specified account's password has expired",
+		$eventIDs{536} = 'Logon Failure - The NetLogon component is not active',
+		$eventIDs{537} = 'Logon failure - The logon attempt failed for other reasons.',
+		$eventIDs{538} = 'User Logoff',
+		$eventIDs{539} = 'Logon Failure - Account locked out',
+		$eventIDs{540} = 'Successful Network Logon',
+		$eventIDs{552} = 'Logon attempt using explicit credentials',
+		$eventIDs{682} = 'Session reconnected to winstation',
+		$eventIDs{683} = 'Session disconnected from winstation',
+	}
+	my %eventTypes = (
+		0		=> 'Success',
+		1		=> 'Error',
+		2		=> 'Warning',
+		4		=> 'Information',
+		8 	=> 'Audit Success',
+		16	=> 'Audit Failure',
+	);
+	# Date 2
+	my $dateBefore;
+	if (exists($$refFilters{date1opt}) and $$refFilters{date1opt} eq $STR{'Equal'} and !exists($$refFilters{date1time})) {
+		$dateBefore = $$refFilters{date1} + 86400; # Add one day
+	} elsif (exists($$refFilters{date2})) { $dateBefore = $$refFilters{date2}; }
+	# Keywords
+	my @keywords;
+	if (my $keywordStr = $$refFilters{keyword}) {
+		if ($keywordStr =~ /;/) { @keywords = split(/;/, $keywordStr); }
+		else                    { push(@keywords, $keywordStr);        }
+	}
+	my $nbrKeywords = @keywords;
+	my %ips;
+	# Stats
+	my %computer;
+	my %system;
+	# Parse the log
+	if (my $parser = Parse::EventLog->new($file)) {
+		my ($firstUT, $lastUT, $base, $x);
+		my %allEvents = $parser->getAll();
+		my $nbrRecs		= scalar(keys %allEvents);
+		for (my $k = 0; $k < 2; $k++) { # 2 pass
+			$x = 0;
+			# Progress
+			$win->lblPbCount->Text("$x/$nbrRecs");
+			$win->pb->SetRange(0, $nbrRecs);
+			$win->pb->SetPos(0);
+			$win->pb->SetStep(1);
+			foreach my $ind (sort keys %allEvents) {
+				my ($hashRef, $ip, $eventTimeUT);
+				my $keep = 1;
+				if ($allEvents{$ind}{TimeGenerated} =~ /\d{10}/) {
+					$eventTimeUT    = $allEvents{$ind}{TimeGenerated};
+					$lastUT         = $eventTimeUT;
+				  $firstUT        = $lastUT if !$firstUT;
+					if (my $computerName = $allEvents{$ind}{Computer}) {
+						if (exists($computer{$computerName})) { $computer{$computerName}++;   }
+						else                                  { $computer{$computerName} = 1; }
+					}
+					#if ($log eq 'system.evt' and $allEvents{$ind}{EventID} == -2147477639) {
+					#	my $systemStr = $allEvents{$ind}{Strings};
+					#	$systemStr =~ s/\r\n//;
+					#	if (exists($system{$systemStr})) { $system{$systemStr}++;   }
+					#	else                             { $system{$systemStr} = 1; }
+					#}
+					my $eventString = join("\n", @{$allEvents{$ind}{Strings}}) if $allEvents{$ind}{Strings};
+					# Match EventID filter
+					if (exists($eventIDs{$allEvents{$ind}{EventID}})) {
+						# Match Dates filter
+						if (exists($$refFilters{date1opt})) {
+							if ($$refFilters{date1opt} eq $STR{'Equal'}) {
+								if ((!$dateBefore and $lastUT != $$refFilters{date1}) or # Must be the exact same date and time
+										($dateBefore and ($lastUT < $$refFilters{date1} or $lastUT > $dateBefore))) { # Must be the same day as date1
+									$keep = 0;
+								}
+							} elsif ($lastUT < $$refFilters{date1}) { $keep = 0; } # Must be after date1
+						}
+						if ($keep) {
+							if (exists($$refFilters{date2}) and $lastUT > $dateBefore) { $keep = 0; } # Must be before date2
+							else {
+								# Match IP address filter
+								if (exists($$refFilters{ip})) {
+									if ($eventString and ($eventString =~ /(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/ or $eventString =~ /($IPv6_re)/)) {
+										$ip = $1;
+										if ($$refFilters{ip} eq 'PublicIPs' and $ip =~ /(?:^127\.|^10\.|^172\.1[6-9]\.|^172\.2[0-9]\.|^172\.3[0-1]\.|^192\.168\.|^::1|^fe80)/) {
+											$keep = 0; # Not a public IP address
+										}
+									} else { $keep = 0; } # No IP in details
+								}
+							}
+							if ($keep) {
+								# Keep the event
+								my $eventID;
+								my $eventInd = $eventTimeUT.'-'.$allEvents{$ind}{RecordNumber};
+								foreach my $name (%{$allEvents{$ind}}) {
+									if ($name and defined($allEvents{$ind}{$name}) and $allEvents{$ind}{$name}) {
+										my $value;
+										if 		($name eq 'EventID'  ) { $value	= $allEvents{$ind}{$name} . ' - ' . $eventIDs{$allEvents{$ind}{$name}};
+																									 $eventID = $allEvents{$ind}{EventID}; }
+										elsif ($name eq 'EventType') { $value	= $allEvents{$ind}{$name} . ' - ' . $eventTypes{$allEvents{$ind}{$name}}; }
+										elsif ($name eq 'Strings'  ) { $value = &formatOldEventStrings($eventString, $eventID) if !$value; }
+										else                         { $value = $allEvents{$ind}{$name}; }
+										$$refEvents{$eventInd}{$name} = $value if $value;
+									}
+								}
+								# Match keywords
+								if ($nbrKeywords) {
+									if ($$refEvents{$eventInd}{Strings}) {
+										my $match = 0;
+										foreach my $word (@keywords) {
+											if ((exists($$refFilters{keywordCase}) and $$refEvents{$eventInd}{Strings} =~ /$word/i) or
+													$$refEvents{$eventInd}{Strings} =~ /$word/) {
+												$match++;
+												last;
+											}
+										}
+										if (!$match) { delete $$refEvents{$eventInd}; $keep = 0; }; # No keyword was found in details
+									} else { delete $$refEvents{$eventInd}; $keep = 0; } # No details
+								}
+								if ($keep) {
+									# Keep IP only
+									if ($win->chReportIPsOnly->Checked() and $$refEvents{$eventInd} and $$refEvents{$eventInd}{Strings}) {
+										if (!$ip and ($$refEvents{$eventInd}{Strings} =~ /(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/ or
+																	$$refEvents{$eventInd}{Strings} =~ /($IPv6_re)/)) { $ip = $1; }
+										$$refEvents{$eventInd}{Strings} = $ip if $ip;
+									}
+									$nbrActivities++;
+								}
+							}
+						}
+					}
+				}
+				$x++;
+        $win->lblPbCount->Text("$x/$nbrRecs");
+        $win->pb->StepIt();
+			}
+		}
+		# Add stats
+		$$refStats{$log}{first}   = $firstUT;
+		$$refStats{$log}{last}    = $lastUT;
+		$$refStats{$log}{nbrRecs} = $nbrRecs;
+		foreach my $c (sort { $computer{$b} <=> $computer{$a} } keys %computer) {
+			$$refStats{computer} = $c;
+			last;
+		}
+#		if ($log eq 'system.evt') {
+#      foreach my $c (sort { $system{$b} <=> $system{$a} } keys %system) {
+#				$$refStats{system} = $c;
+#				last;
+#			}
+#		}
+		return($nbrActivities);
+	}
+	
+}   #--- End parseOldEventLog
+
+#--------------------------#
+sub formatOldEventStrings
+#--------------------------#
+{
+	# Local variables
+	my ($eventStr, $eventID) = @_;
+	my @strings = split(/\n/, $eventStr);
+	my $formatedString;
+	if (($eventID >= 528 and $eventID <= 536) or $eventID == 539 or $eventID == 540) {
+		$formatedString .= "User Name: $strings[0]\r\n";
+		$formatedString .= "Domain: $strings[1]\r\n";
+		$formatedString .= "Logon ID:	$strings[2]\r\n";
+		$formatedString .= "Logon Type: $strings[3]\r\n";
+		$formatedString .= "Logon Process:	$strings[4]\r\n";
+		$formatedString .= "Authentication Package: $strings[5]\r\n";
+		$formatedString .= "Workstation Name:	$strings[6]\r\n";
+		$formatedString .= "Logon GUID:	$strings[7]";
+		if ($strings[8]) {
+			$formatedString .= "\r\n";
+			$formatedString .= "Caller User Name:	$strings[8]\r\n";
+			$formatedString .= "Caller Domain:	$strings[9]\r\n";
+			$formatedString .= "Caller Logon ID: $strings[10]\r\n";
+			$formatedString .= "Caller Process ID:	$strings[11]\r\n";
+			$formatedString .= "Transited Services: $strings[12]\r\n";
+			$formatedString .= "Source Network Address: $strings[13]\r\n";
+			$formatedString .= "Source Port: $strings[14]";
+		}
+	} elsif ($eventID == 537) {
+		$formatedString .= "User Name: $strings[0]\r\n";
+		$formatedString .= "Domain: $strings[1]\r\n";
+		$formatedString .= "Logon Type: $strings[2]\r\n";
+		$formatedString .= "Logon Process:	$strings[3]\r\n";
+		$formatedString .= "Authentication Package: $strings[4]\r\n";
+		$formatedString .= "Workstation Name:	$strings[5]\r\n";
+		$formatedString .= "Status code: $strings[6]\r\n";
+		$formatedString .= "Substatus code:	$strings[7]\r\n";
+		$formatedString .= "Caller User Name:	$strings[8]\r\n";
+		$formatedString .= "Caller Domain:	$strings[9]\r\n";
+		$formatedString .= "Caller Logon ID: $strings[10]\r\n";
+		$formatedString .= "Caller Process ID:	$strings[11]\r\n";
+		$formatedString .= "Transited Services: $strings[12]\r\n";
+		$formatedString .= "Source Network Address: $strings[13]\r\n";
+		$formatedString .= "Source Port: $strings[14]";
+	} elsif ($eventID == 538) {
+		$formatedString .= "User Name: $strings[0]\r\n";
+		$formatedString .= "Domain: $strings[1]\r\n";
+		$formatedString .= "Logon ID:	$strings[2]\r\n";
+		$formatedString .= "Logon Type: $strings[3]";
+	} elsif ($eventID == 552) {
+		my $row = 0;
+		$row++ if length($strings[0]) < 3;
+		$formatedString .= "Logged on user:\r\n";
+		$formatedString .= "User Name: $strings[$row]\r\n"; $row++;
+		$formatedString .= "Domain: $strings[$row]\r\n"; $row++;
+		$formatedString .= "Logon ID:	$strings[$row]\r\n"; $row++;
+		$formatedString .= "Logon GUID:	$strings[$row]\r\n\r\n"; $row++;
+		$formatedString .= "User whose credentials were used:\r\n";
+		$formatedString .= "Target User Name: $strings[$row]\r\n"; $row++;
+		$formatedString .= "Target Domain:	$strings[$row]\r\n"; $row++;
+		$formatedString .= "Target Logon GUID: $strings[$row]\r\n\r\n"; $row++;
+		$formatedString .= "Target Server Name: $strings[$row]\r\n"; $row++;
+		$formatedString .= "Target Server Info: $strings[$row]\r\n"; $row++;
+		$formatedString .= "Caller Process ID: $strings[$row]\r\n"; $row++;
+		$formatedString .= "Source Network Address: $strings[$row]\r\n"; $row++;
+		if ($strings[$row]) { $formatedString .= "Source Port: $strings[$row]";	}
+		else								{ $formatedString .= "Source Port: -";							}
+	} elsif ($eventID == 682 or $eventID == 683) {
+		$formatedString .= "User Name: $strings[0]\r\n";
+		$formatedString .= "Domain:	$strings[1]\r\n";
+		$formatedString .= "Logon ID: $strings[2]\r\n";
+		$formatedString .= "Session Name: $strings[3]\r\n";
+		$formatedString .= "Client Name:	$strings[4]\r\n";
+		$formatedString .= "Client Address: $strings[5]";
+	} else {
+		my $i = 0;
+		foreach (@strings) { chomp($strings[$i]); $formatedString .= "$strings[$i]\r\n"; $i++; }
+	}
+	return($formatedString);
+	
+}   #--- End formatOldEventStrings
+
+#--------------------------#
+sub reportXLSX
+#--------------------------#
+{
+	# Local variables
+	my ($report, $nbrActivities, $refEvents, $refStats) = @_;
+  # Create an XLSX workbook with a single sheet
+  if (my $excel = Excel::Writer::XLSX->new($report)) {
+    # Set metadata
+    $excel->set_properties(comments => 'Generated by RDP-Parser '.$VERSION);
+		# Create the stats sheet
+		if ($win->chReportAddStats->Checked() and my $sheet = $excel->add_worksheet($STR{'Stats'})) {
+			my @files = ('Security.evtx', 'Microsoft-Windows-TerminalServices-LocalSessionManager%4Operational.evtx',
+									 'Microsoft-Windows-TerminalServices-RemoteConnectionManager%4Operational.evtx',
+									 'Microsoft-Windows-RemoteDesktopServices-RdpCoreTS%4Operational.evtx',
+									 'System.evtx', 'security.evt', 'SecEvent.Evt');
+			my $formatNormal = $excel->add_format(align => 'top', size => 10);
+			my $i = 0;
+			if (exists($$refStats{computer})) {
+				$sheet->write_string($i, 0, $STR{'Computer'}.':', $formatNormal);
+				$sheet->write_string($i, 1, $$refStats{computer}, $formatNormal);
+				$i++;
+			}
+			if (exists($$refStats{system})) {
+				$sheet->write_string($i, 0, $STR{'System'}.':', $formatNormal);
+				$sheet->write_string($i, 1, $$refStats{system}, $formatNormal);
+				$i++;
+			}
+			foreach my $file (@files) {
+				if (exists($$refStats{$file})) {
+					$i++;
+					$sheet->write_string($i, 0, $STR{'File'}.':'       , $formatNormal);
+					$sheet->write_string($i, 1, $file                  , $formatNormal);
+					$i++;
+					my $firstDateStr = &dateTZ($$refStats{$file}{first});
+					$sheet->write_string($i, 0, $STR{'FirstEntry'}.':' , $formatNormal);
+					$sheet->write_string($i, 1, $firstDateStr          , $formatNormal);
+					$i++;
+					my $lastDateStr  = &dateTZ($$refStats{$file}{last});
+					$sheet->write_string($i, 0, $STR{'LastEntry'}.':'  , $formatNormal);
+					$sheet->write_string($i, 1, $lastDateStr           , $formatNormal);
+					$i++;
+					my $nbrEntries = $$refStats{$file}{nbrRecs};
+					$sheet->write_string($i, 0, $STR{'NbrEntries'}.':' , $formatNormal);
+					$sheet->write_string($i, 1, $nbrEntries            , $formatNormal);
+					$i++;
+				}
+			}
+			$sheet->set_column(0, 0, 18);
+			$sheet->set_column(1, 1, 70);
+		}
+    # Create the Event sheet
+    if (my $sheet = $excel->add_worksheet($STR{'Results'})) {
+			# Selected columns
+			my $allCols = 1;
+			my %selCols;
+			if ($win->rbReportColsSel->Checked()) {
+				$allCols = 0;
+				$selCols{TimeGenerated} = 1 if $winCols->lvCols->GetCheckState(0);
+				$selCols{TimeWritten}   = 1 if $winCols->lvCols->GetCheckState(1);
+				$selCols{Computer}      = 1 if $winCols->lvCols->GetCheckState(2); 
+				$selCols{Source}        = 1 if $winCols->lvCols->GetCheckState(3);
+				$selCols{RecordNumber}  = 1 if $winCols->lvCols->GetCheckState(4);
+				$selCols{Category}      = 1 if $winCols->lvCols->GetCheckState(5);
+				$selCols{EventID}       = 1 if $winCols->lvCols->GetCheckState(6);
+				$selCols{EventType}     = 1 if $winCols->lvCols->GetCheckState(7);
+				$selCols{Details}       = 1 if $winCols->lvCols->GetCheckState(8);
+			}
+			# Format
+			my $formatHeader	= $excel->add_format(align => 'center', size => 10, bold => 1);
+			my $formatDate		= $excel->add_format(align => 'top'		, size => 10, num_format => 'yyyy-mm-dd hh:mm:ss', size => 10);
+			my $formatNormal	= $excel->add_format(align => 'top'		, size => 10);
+			my $formatDetails	= $excel->add_format(align => 'top'		, size => 10, text_wrap => 1);
+			# Column width
+      my $maxWidthCol1 = length('TimeGenerated')+5 if $allCols or exists($selCols{TimeGenerated});
+      my $maxWidthCol2 = length('Timewritten')	+5 if $allCols or exists($selCols{TimeWritten});
+      my $maxWidthCol3 = length('Computer')			+5 if $allCols or exists($selCols{Computer});
+      my $maxWidthCol4 = length('Source')				+5 if $allCols or exists($selCols{Source});
+      my $maxWidthCol5 = length('RecordNumber')	+5 if $allCols or exists($selCols{RecordNumber});
+      my $maxWidthCol6 = length('Category')			+5 if $allCols or exists($selCols{Category});
+      my $maxWidthCol7 = length('EventID')			+5 if $allCols or exists($selCols{EventID});
+      my $maxWidthCol8 = length('EventType')		+5 if $allCols or exists($selCols{EventType});
+      my $maxWidthCol9 = length('Details')			+5 if $allCols or exists($selCols{Details});
+			# Print header
+			my $header;
+			my $countCol = 0;
+			my $j = 0; # Column No
+			if ($allCols or exists($selCols{TimeGenerated})) { $sheet->write(0, $j, 'TimeGenerated' , $formatHeader ); $j++; }
+			if ($allCols or exists($selCols{TimeWritten})  ) { $sheet->write(0, $j, 'TimeWritten'	  , $formatHeader ); $j++; }
+			if ($allCols or exists($selCols{Computer})     ) { $sheet->write(0, $j, 'Computer'			, $formatHeader ); $j++; }
+			if ($allCols or exists($selCols{Source})       ) { $sheet->write(0, $j, 'Source'				, $formatHeader ); $j++; }
+			if ($allCols or exists($selCols{RecordNumber}) ) { $sheet->write(0, $j, 'RecordNumber'	, $formatHeader ); $j++; }
+			if ($allCols or exists($selCols{Category})     ) { $sheet->write(0, $j, 'Category'			, $formatHeader ); $j++; }
+			if ($allCols or exists($selCols{EventID})      ) { $sheet->write(0, $j, 'EventID'			  , $formatHeader ); $j++; }
+			if ($allCols or exists($selCols{EventType})    ) { $sheet->write(0, $j, 'EventType'	  	, $formatHeader ); $j++; }
+			if ($allCols or exists($selCols{Details})      ) { $sheet->write(0, $j, 'Details'			  , $formatHeader ); }
+			# Print data
+			my $i = 1;
+			foreach my $ind (sort %{$refEvents}) {
+				if ($ind and $$refEvents{$ind}{TimeGenerated}) {
+					$j = 0;
+					if ($allCols or exists($selCols{TimeGenerated})) {
+						my $dateStr = &dateTZ($$refEvents{$ind}{TimeGenerated});
+						$sheet->write_date_time($i, $j, $dateStr, $formatDate);
+						$maxWidthCol1 = length($dateStr) if length($dateStr) > $maxWidthCol1;
+						$j++;
+					}
+					if ($allCols or exists($selCols{TimeWritten})) {
+						my $dateStr = &dateTZ($$refEvents{$ind}{Timewritten}) if exists($$refEvents{$ind}{Timewritten});
+						if ($dateStr) {
+							$sheet->write_date_time($i, $j, $dateStr, $formatDate);
+							$maxWidthCol2 = length($dateStr) if length($dateStr) > $maxWidthCol2;
+						}
+						$j++;
+					}
+					if ($allCols or exists($selCols{Computer})) {
+						if ($$refEvents{$ind}{Computer}) {
+							$sheet->write_string($i, $j, $$refEvents{$ind}{Computer}, $formatNormal);
+							$maxWidthCol3 = length($$refEvents{$ind}{Computer}) if length($$refEvents{$ind}{Computer}) > $maxWidthCol3;
+						}
+						$j++;
+					}
+					if ($allCols or exists($selCols{Source})) {
+						if ($$refEvents{$ind}{Source}) {
+							$sheet->write_string($i, $j, $$refEvents{$ind}{Source}, $formatNormal);
+							$maxWidthCol4 = length($$refEvents{$ind}{Source}) if length($$refEvents{$ind}{Source}) > $maxWidthCol4;
+						}
+						$j++;
+					}
+					if ($allCols or exists($selCols{RecordNumber})) {
+						if ($$refEvents{$ind}{RecordNumber}) {
+							$sheet->write_string($i, $j, $$refEvents{$ind}{RecordNumber}, $formatNormal);
+							$maxWidthCol5 = length($$refEvents{$ind}{RecordNumber}) if length($$refEvents{$ind}{RecordNumber}) > $maxWidthCol5;
+						}
+						$j++;
+					}
+					if ($allCols or exists($selCols{Category})) {
+						if ($$refEvents{$ind}{Category}) {
+							$sheet->write_string($i, $j, $$refEvents{$ind}{Category}, $formatNormal) if $$refEvents{$ind}{Category};
+							$maxWidthCol6 = length($$refEvents{$ind}{Category}) if length($$refEvents{$ind}{Category}) > $maxWidthCol6;
+						}
+						$j++;
+					}
+					if ($allCols or exists($selCols{EventID})) {
+						if ($$refEvents{$ind}{EventID}) {
+							$sheet->write_string($i, $j, $$refEvents{$ind}{EventID}, $formatNormal); 
+							$maxWidthCol7 = length($$refEvents{$ind}{EventID}) if length($$refEvents{$ind}{EventID}) > $maxWidthCol7;
+						}
+						$j++;
+					}
+					if ($allCols or exists($selCols{EventType})) {
+						if ($$refEvents{$ind}{EventType}) {
+							$sheet->write_string($i, $j, $$refEvents{$ind}{EventType}, $formatNormal);
+							$maxWidthCol8 = length($$refEvents{$ind}{EventType}) if length($$refEvents{$ind}{EventType}) > $maxWidthCol8;
+						}
+						$j++;
+					}
+					if ($allCols or exists($selCols{Details})) {
+						if ($$refEvents{$ind}{Strings}) {
+							chop($$refEvents{$ind}{Strings}) while $$refEvents{$ind}{Strings} =~ /[\r\n]$/;
+							if ($win->chReportDataInline->Checked()) {
+								$$refEvents{$ind}{Strings} =~ s/\r\n/\|/g;
+								$sheet->write_string($i, $j, $$refEvents{$ind}{Strings}, $formatNormal);
+							} else {
+								$sheet->write_string($i, $j, $$refEvents{$ind}{Strings}, $formatDetails);
+								$maxWidthCol9 = length($$refEvents{$ind}{Strings}) if length($$refEvents{$ind}{Strings}) > $maxWidthCol9;
+							}
+						}
+					}
+					$i++;
+					$win->lblPbCount->Text(($i-1)."/$nbrActivities");
+					$win->pb->StepIt();
+				}
+			}
+      # Ajust column sizes
+      $j = 0;
+			if ($allCols or exists($selCols{TimeGenerated})) { $sheet->set_column($j, $j, $maxWidthCol1); $j++; }
+			if ($allCols or exists($selCols{TimeWritten})  ) { $sheet->set_column($j, $j, $maxWidthCol2); $j++; }
+			if ($allCols or exists($selCols{Computer})     ) { $sheet->set_column($j, $j, $maxWidthCol3); $j++; }
+			if ($allCols or exists($selCols{Source})       ) { $sheet->set_column($j, $j, $maxWidthCol4); $j++; }
+			if ($allCols or exists($selCols{RecordNumber}) ) { $sheet->set_column($j, $j, $maxWidthCol5); $j++; }
+			if ($allCols or exists($selCols{Category})     ) { $sheet->set_column($j, $j, $maxWidthCol6); $j++; }
+			if ($allCols or exists($selCols{EventID})      ) { $sheet->set_column($j, $j, $maxWidthCol7); $j++; }
+			if ($allCols or exists($selCols{EventType})    ) { $sheet->set_column($j, $j, $maxWidthCol8); $j++; }
+			if ($allCols or exists($selCols{Details})      ) { $sheet->set_column($j, $j, $maxWidthCol9);       }
+      # Set autofilter
+      $sheet->autofilter(0, 0, 0, $j);
+      $sheet->freeze_panes(1, 0);
+		}
+		$excel->close(); # Close the file
+		return($report);
+	}
+	
+}  #--- End reportXLSX
+
+#--------------------------#
+sub reportHTML
+#--------------------------#
+{
+	# Local variables
+	my ($report, $nbrActivities, $refEvents, $refStats) = @_;
+  # Create an XLSX workbook with a single sheet
+  if (open(my $fhReport, '>', $report)) {
+    flock($fhReport, 2);
+		my $timeStr = &date(time);
+		# Selected columns
+		my $allCols = 1;
+		my %selCols;
+		if ($win->rbReportColsSel->Checked()) {
+			$allCols = 0;
+			$selCols{TimeGenerated} = 1 if $winCols->lvCols->GetCheckState(0);
+			$selCols{TimeWritten}   = 1 if $winCols->lvCols->GetCheckState(1);
+			$selCols{Computer}      = 1 if $winCols->lvCols->GetCheckState(2); 
+			$selCols{Source}        = 1 if $winCols->lvCols->GetCheckState(3);
+			$selCols{RecordNumber}  = 1 if $winCols->lvCols->GetCheckState(4);
+			$selCols{Category}      = 1 if $winCols->lvCols->GetCheckState(5);
+			$selCols{EventID}       = 1 if $winCols->lvCols->GetCheckState(6);
+			$selCols{EventType}     = 1 if $winCols->lvCols->GetCheckState(7);
+			$selCols{Details}       = 1 if $winCols->lvCols->GetCheckState(8);
+		}
+    print $fhReport "<!DOCTYPE html>\n";
+    print $fhReport "<html>\n<head>\n<title>RDP-Parser report $timeStr</title>\n";
+    print $fhReport "<meta name=\"generator\" content=\"RDP-Parser $VERSION\">\n";
+    print $fhReport "<style>\n";
+    print $fhReport "table, td { border-collapse: collapse; border: 1px solid black; padding: 5px; }\n";
+    print $fhReport "td { font-size:11pt; vertical-align: top; white-space: wrap; }\n";
+    print $fhReport ".header { text-align: center; font-weight: bold }\n";
+    print $fhReport "</style>\n";
+    print $fhReport "</head>\n";
+    print $fhReport "<body style=\"font-family: Calibri, Verdana, Arial;\">\n";
+		# Stats
+		if ($win->chReportAddStats->Checked()) {
+			print $fhReport "<table align=\"center\" width=\"100%\">\n";
+			my @files = ('Security.evtx', 'Microsoft-Windows-TerminalServices-LocalSessionManager%4Operational.evtx',
+									 'Microsoft-Windows-TerminalServices-RemoteConnectionManager%4Operational.evtx',
+									 'Microsoft-Windows-RemoteDesktopServices-RdpCoreTS%4Operational.evtx',
+									 'System.evtx', 'security.evt', 'SecEvent.Evt');
+      print $fhReport "<tr><th colspan=\"4\" class=\"header\">$STR{'Stats'}</th></tr>\n";
+			if (exists($$refStats{computer})) {
+				print $fhReport "<tr><td colspan=\"4\" class=\"header\">$STR{'Computer'}: $$refStats{computer}</td></tr>\n";
+			}
+			#if (exists($$refStats{system})) {
+			#	print $fhReport "<td>$STR{'System'}.':'</td>\n";
+			#	print $fhReport "<td>$$refStats{system}</td>\n";
+			#}
+			print $fhReport "<tr>\n";
+			print $fhReport "<td class=\"header\">$STR{'File'}</td>\n";
+			print $fhReport "<td class=\"header\">$STR{'FirstEntry'}</td>\n";
+			print $fhReport "<td class=\"header\">$STR{'LastEntry'}</td>\n";
+			print $fhReport "<td class=\"header\">$STR{'NbrEntries'}</td>\n";
+			print $fhReport "</tr>\n";
+			foreach my $file (@files) {
+				if (exists($$refStats{$file})) {
+					print $fhReport "<tr>\n";
+				  print $fhReport "<td>$file</td>\n";
+					my $firstDateStr = &dateTZ($$refStats{$file}{first});
+				  print $fhReport "<td>$firstDateStr</td>\n";
+					my $lastDateStr  = &dateTZ($$refStats{$file}{last});
+				  print $fhReport "<td>$lastDateStr</td>\n";
+					my $nbrEntries = $$refStats{$file}{nbrRecs};
+				  print $fhReport "<td>$nbrEntries</td>\n";
+					print $fhReport "</tr>\n";
+				}
+			}
+			print $fhReport "</table><br>\n";
+		}
+    print $fhReport "<table align=\"center\" width=\"100%\">\n";
+    # File Header
+		print $fhReport "<tr>\n";
+		print $fhReport "<td class=\"header\">TimeGenerated</td>\n" if $allCols or exists($selCols{TimeGenerated});
+		print $fhReport "<td class=\"header\">Timewritten</td>\n"   if $allCols or exists($selCols{Timewritten});
+		print $fhReport "<td class=\"header\">Computer</td>\n"      if $allCols or exists($selCols{Computer});
+		print $fhReport "<td class=\"header\">Source</td>\n"        if $allCols or exists($selCols{Source});
+		print $fhReport "<td class=\"header\">RecordNumber</td>\n"  if $allCols or exists($selCols{RecordNumber});
+		print $fhReport "<td class=\"header\">Category</td>\n"      if $allCols or exists($selCols{Category});
+		print $fhReport "<td class=\"header\">EventID</td>\n"       if $allCols or exists($selCols{EventID});
+		print $fhReport "<td class=\"header\">EventType</td>\n"     if $allCols or exists($selCols{EventType});
+		print $fhReport "<td class=\"header\">Details</td>\n"       if $allCols or exists($selCols{Details});
+		print $fhReport "</tr>\n";
+		# Print data
+		my $i = 1;
+		foreach my $ind (sort %{$refEvents}) {
+			if ($ind and $$refEvents{$ind}{TimeGenerated}) {
+				print $fhReport "<tr>\n";
+				if ($allCols or exists($selCols{TimeGenerated})) {
+					my $dateStr = &dateTZ($$refEvents{$ind}{TimeGenerated});
+					print $fhReport "<td>$dateStr</td>\n";
+				}
+				if ($allCols or exists($selCols{Timewritten})) {
+					if ($$refEvents{$ind}{Timewritten}) {
+						my $dateStr = &dateTZ($$refEvents{$ind}{Timewritten});
+						print $fhReport "<td>$dateStr</td>\n";
+					} else { print $fhReport "<td></td>\n"; }
+				}
+				print $fhReport "<td>$$refEvents{$ind}{Computer}</td>\n"     if $allCols or exists($selCols{Computer});
+				print $fhReport "<td>$$refEvents{$ind}{Source}</td>\n"       if $allCols or exists($selCols{Source});
+				print $fhReport "<td>$$refEvents{$ind}{RecordNumber}</td>\n" if $allCols or exists($selCols{RecordNumber});
+				if ($allCols or exists($selCols{Category})) {
+					if ($$refEvents{$ind}{Category}) {
+						print $fhReport "<td>$$refEvents{$ind}{Category}</td>\n";
+					} else { print $fhReport "<td></td>\n"; }
+				}
+				print $fhReport "<td>$$refEvents{$ind}{EventID}</td>\n"   if $allCols or exists($selCols{EventID});
+				print $fhReport "<td>$$refEvents{$ind}{EventType}</td>\n" if $allCols or exists($selCols{EventType});
+				if ($allCols or exists($selCols{Details})) {
+					chop($$refEvents{$ind}{Strings}) while $$refEvents{$ind}{Strings} =~ /[\r\n]$/;
+					my $value = $$refEvents{$ind}{Strings};
+					if ($win->chReportDataInline->Checked())	{ $value =~ s/\r\n/\|/g; 	 }
+					else						                          { $value =~ s/\r\n/<br>/g; }
+					print $fhReport "<td>$value</td>\n";
+				}
+				print $fhReport "</tr>\n";
+				$i++;
+				$win->lblPbCount->Text(($i-1)."/$nbrActivities");
+				$win->pb->StepIt();
+			}
+		}
+		print $fhReport "</table>\n";
+		print $fhReport "</body></html>\n";
+		close($report);
+		return($report);
+	}
+	
+}  #--- End reportHTML
+
+#--------------------------#
+sub reportTXT
+#--------------------------#
+{
+	# Local variables
+	my ($report, $nbrActivities, $refEvents) = @_;
+  # Create an XLSX workbook with a single sheet
+  if (open(my $fhReport, '>', $report)) {
+    flock($fhReport, 2);
+		# Selected columns
+		my $allCols = 1;
+		my %selCols;
+		if ($win->rbReportColsSel->Checked()) {
+			$allCols = 0;
+			$selCols{TimeGenerated} = 1 if $winCols->lvCols->GetCheckState(0);
+			$selCols{TimeWritten}   = 1 if $winCols->lvCols->GetCheckState(1);
+			$selCols{Computer}      = 1 if $winCols->lvCols->GetCheckState(2); 
+			$selCols{Source}        = 1 if $winCols->lvCols->GetCheckState(3);
+			$selCols{RecordNumber}  = 1 if $winCols->lvCols->GetCheckState(4);
+			$selCols{Category}      = 1 if $winCols->lvCols->GetCheckState(5);
+			$selCols{EventID}       = 1 if $winCols->lvCols->GetCheckState(6);
+			$selCols{EventType}     = 1 if $winCols->lvCols->GetCheckState(7);
+			$selCols{Details}       = 1 if $winCols->lvCols->GetCheckState(8);
+		}
+    # File Header
+		print $fhReport "TimeGenerated\t" if $allCols or exists($selCols{TimeGenerated});
+		print $fhReport "Timewritten\t"   if $allCols or exists($selCols{Timewritten});
+		print $fhReport "Computer\t"      if $allCols or exists($selCols{Computer});
+		print $fhReport "Source\t"        if $allCols or exists($selCols{Source});
+		print $fhReport "RecordNumber\t"  if $allCols or exists($selCols{RecordNumber});
+		print $fhReport "Category\t"      if $allCols or exists($selCols{Category});
+		print $fhReport "EventID\t"       if $allCols or exists($selCols{EventID});
+		print $fhReport "EventType\t"     if $allCols or exists($selCols{EventType});
+		print $fhReport "Details\n"       if $allCols or exists($selCols{Details});
+		# Print data
+		my $i = 1;
+		foreach my $ind (sort %{$refEvents}) {
+			if ($ind and $$refEvents{$ind}{TimeGenerated}) {
+				if ($allCols or exists($selCols{TimeGenerated})) {
+					my $dateStr = &dateTZ($$refEvents{$ind}{TimeGenerated});
+					print $fhReport "$dateStr\t";
+				}
+				if ($allCols or exists($selCols{Timewritten})) {
+					if ($$refEvents{$ind}{Timewritten}) {
+						my $dateStr = &dateTZ($$refEvents{$ind}{Timewritten});
+						print $fhReport "$dateStr";
+					}
+				  print $fhReport "\t";
+				}
+				print $fhReport "$$refEvents{$ind}{Computer}\t"     if $allCols or exists($selCols{Computer});
+				print $fhReport "$$refEvents{$ind}{Source}\t"       if $allCols or exists($selCols{Source});
+				print $fhReport "$$refEvents{$ind}{RecordNumber}\t" if $allCols or exists($selCols{RecordNumber});
+				if ($allCols or exists($selCols{Category})) {
+					print $fhReport "$$refEvents{$ind}{Category}" if $$refEvents{$ind}{Category};
+					print $fhReport "\t";
+				}
+				print $fhReport "$$refEvents{$ind}{EventID}\t"   if $allCols or exists($selCols{EventID});
+				print $fhReport "$$refEvents{$ind}{EventType}\t" if $allCols or exists($selCols{EventType});
+				if ($allCols or exists($selCols{Details})) {
+					chop($$refEvents{$ind}{Strings}) while $$refEvents{$ind}{Strings} =~ /[\r\n]$/;
+					if ($win->chReportDataInline->Checked())	{
+						$$refEvents{$ind}{Strings} =~ s/\r\n/\|/g;
+						$$refEvents{$ind}{Strings} =~ s/[\r\n]/\|/g;
+						print $fhReport "$$refEvents{$ind}{Strings}\n";
+					} else { print $fhReport "\"$$refEvents{$ind}{Strings}\"\n"; }
+				}
+				$i++;
+				$win->lblPbCount->Text(($i-1)."/$nbrActivities");
+				$win->pb->StepIt();
+			}
+		}
+		close($report);
+		return($report);
+	}
+	
+}  #--- End reportTXT
+
+#--------------------------#
+sub lblNotReady_Click { &isProcessReady(1); }
+#--------------------------#
+
+#--------------------------#
+sub btnHelp_Click
+#--------------------------#
+{
+  # Open RDP-Parser documentation page with default browser
+  $win->ShellExecute('open', $URL_DOC,'','',1) or
+  Win32::GUI::MessageBox($win, Win32::FormatMessage(Win32::GetLastError()), "RDP-Parser", 0x40010);
+
+}  #--- End btnHelp_Click
+
+#--------------------------#
+sub btnAbout_Click
+#--------------------------#
+{
+  # Create the window
+  my $winAbout  = Win32::GUI::DialogBox->new( -name        => 'winAbout'                    ,
+                                              -parent      => $win                          ,
+                                              -text        => $STR{'About'}.' RDP-Parser'   ,
+                                              -pos         => [$winPosX, $winPosY]          ,
+                                              -size        => [520, 160]                    ,
+                                              -background  => [255, 255, 255]               ,
+                                              -hasmaximize => 0                             ,
+                                              -hasminimize => 1                             ,
+                                              -helpbutton  => 0                             ,
+                                              -resizable   => 0                             ,
+                                              -dialogui    => 1                             , );
+  $winAbout->SetIcon($winICO);
+  # About tab
+  $winAbout->AddLabel(  -name        => 'lblLogo128'            ,
+                        -size        => [128,128]               ,
+                        -pos         => [  0,  0]               ,
+                        -background  => [255, 255, 255]         ,
+                        -bitmap      => $logo128                , );
+  $winAbout->AddLabel(  -name        => 'lblAbout1'             ,
+                        -size        => [ 90, 75]               ,
+                        -pos         => [140, 20]               ,
+                        -font        => $font10                 ,
+                        -background  => [255, 255, 255]         ,
+                        -text        => "$STR{'Version'}:\n$STR{'Website'}:\n$STR{'Author'}:\n$STR{'TranslatedBy'}:", );
+  $winAbout->AddLabel(  -name        => 'lblAbout2'             ,
+                        -size        => [230, 75]               ,
+                        -pos         => [235, 20]               ,
+                        -font        => $font10b                ,
+                        -foreground  => [100, 100, 100]         ,
+                        -background  => [255, 255, 255]         ,
+                        -text        => "$VERSION\nhttp://www.le-tools.com\nAlain Rioux (admin\@le-tools.com)\n$STR{'TranslatorName'}", );
+  $winAbout->AddLabel(  -name        => 'lblAbout3'             ,
+                        -size        => [300, 20]               ,
+                        -pos         => [140, 90]               ,
+                        -font        => $font10                 ,
+                        -background  => [255, 255, 255]         ,
+                        -text        => '© Copyright 2018-2019 Alain Rioux', );
+  $winAbout->Center($win);
+  $winAbout->DoModal();
+  return(1);
+
+}  #--- End btnAbout_Click
+
+#--------------------------#
+sub btnWinConfig_Click
+#--------------------------#
+{
+  # Show Config window with General Tab
+  $winConfig->configTab->SetCurSel(0);
+  &configTab_Click;
+  $winConfig->Center($win);
+  $winConfig->DoModal();
+
+}  #--- End btnWinConfig_Click
+
+#--------------------------#
+sub configTab_Click
+#--------------------------#
+{
+  # Show General tab
+  if (!$winConfig->configTab->SelectedItem()) {
+    $winConfig->lblToolShadowT->Show();
+    $winConfig->lblToolT->Show();
+    $winConfig->btnCheckUpdate->Show();
+    $winConfig->chAutoUpdate->Show();
+    $winConfig->btnExportLang->Show();
+    $winConfig->btnOpenUserDir->Show();
+    # Hide logging tab
+    $winConfig->chEnableLogging->Hide();
+    $winConfig->btnOpenLog->Hide();
+    $winConfig->rbUseDefaultDir->Hide();
+    $winConfig->rbLoggingDir->Hide();
+    $winConfig->tfLoggingDir->Hide();
+    $winConfig->btnLoggingDir->Hide();
+  # Show Logging tab
+  } else {
+    $winConfig->chEnableLogging->Show();
+    $winConfig->btnOpenLog->Show();
+    my $logFile;
+    my $loggingDir = $winConfig->tfLoggingDir->Text();
+    if ($winConfig->rbLoggingDir->Checked() and $loggingDir and -d $loggingDir) {
+      $logFile = $loggingDir;
+    } else { $logFile = $USERDIR; }
+    $logFile .= '\RDP-Parser.log';
+    if ($logFile and -T $logFile) { $winConfig->btnOpenLog->Enable();  }
+    else                          { $winConfig->btnOpenLog->Disable(); }
+    # Show options
+    if ($winConfig->chEnableLogging->Checked()) {
+      # Enable options
+      $winConfig->rbUseDefaultDir->Show();
+      $winConfig->rbLoggingDir->Show();
+      $winConfig->tfLoggingDir->Show();
+      $winConfig->btnLoggingDir->Show();
+      if ($winConfig->rbUseDefaultDir->Checked()) {
+        $winConfig->tfLoggingDir->Disable();
+        $winConfig->btnLoggingDir->Disable();
+      } else {
+        $winConfig->tfLoggingDir->Enable();
+        $winConfig->btnLoggingDir->Enable();
+      }
+    } else {
+      # Disable options
+      $winConfig->rbUseDefaultDir->Hide();
+      $winConfig->rbLoggingDir->Hide();
+      $winConfig->tfLoggingDir->Hide();
+      $winConfig->btnLoggingDir->Hide();
+    }
+    # Hide general tab
+    $winConfig->lblToolShadowT->Hide();
+    $winConfig->lblToolT->Hide();
+    $winConfig->btnCheckUpdate->Hide();
+    $winConfig->chAutoUpdate->Hide();
+    $winConfig->btnExportLang->Hide();
+    $winConfig->btnOpenUserDir->Hide();
+  }
+
+}  #--- End configTab_Click
+
+#--------------------------#
+sub btnExportLang_Click
+#--------------------------#
+{
+  # Save strings in Lang.ini
+  open(LANG, ">$LANG_FILE");
+  flock(LANG, 2);
+  foreach my $cle (keys %STR) { print LANG "$cle = $STR{$cle}\n"; }
+  close(LANG);
+  # Open the page
+  $win->ShellExecute('open', $LANG_FILE,'','',1);
+
+}  #--- End btnExportLang_Click
+
+#--------------------------#
+sub btnOpenUserDir_Click
+#--------------------------#
+{
+  # Open Window Explorer
+  Win32::Process::Create(my $ProcessObj, "$ENV{'WINDIR'}\\explorer.exe", "explorer $USERDIR", 0, NORMAL_PRIORITY_CLASS, ".") if -d $USERDIR;
+
+}  #--- End btnOpenUserDir_Click
+
+#--------------------------#
+sub btnCheckUpdate_Click { &updateTool(1); }
+#--------------------------#
+
+#--------------------------#
+sub chAutoUpdate_Click
+#--------------------------#
+{
+  # Save the choice
+  if ($winConfig->chAutoUpdate->Checked()) {
+    $CONFIG{'TOOL_AUTO_UPDATE'} = 1;
+    &saveConfig(\%CONFIG);
+  } else {
+    $CONFIG{'TOOL_AUTO_UPDATE'} = 0;
+    &saveConfig(\%CONFIG);
+  }
+
+}  #--- End chAutoUpdate_Click
+
+#--------------------------#
+sub updateTool
+#--------------------------#
+{
+  # Local variables
+  my $confirm = shift;
+  # Download the version file  
+  my $ua = new LWP::UserAgent;
+  $ua->agent("RDP-Parser Update $VERSION");
+  $ua->default_header('Accept-Language' => 'en');
+  my $req = new HTTP::Request GET => $URL_VER;
+  my $res = $ua->request($req);
+  # Success, compare versions
+  if ($res->is_success) {
+    my $status  = $res->code;
+    my $content = $res->content;
+    my $currVer;
+    $currVer = $1 if $content =~ /([\d\.]+)/i;
+    # No update available
+    if ($currVer le $VERSION) {
+      Win32::GUI::MessageBox($winConfig, $STR{'update1'}, $STR{'update2'}, 0x40040) if $confirm; # Up to date
+    } else {
+      my $answer = Win32::GUI::MessageBox($winConfig, "$STR{'Version'} $currVer $STR{'update5'} ?", $STR{'update3'}, 0x40024); # Download available
+      # Download the update
+      if ($answer == 6) {
+        # Open XL-RDP-Parser page with default browser
+        $win->ShellExecute('open', $URL_TOOL,'','',1) or
+        Win32::GUI::MessageBox($winConfig, Win32::FormatMessage(Win32::GetLastError()), "$STR{'update3'} RDP-Parser",0x40010);
+      }
+    }
+  }
+  # Error 
+  else { Win32::GUI::MessageBox($winConfig, $STR{'errorConnection'}.': '.$res->status_line, "$STR{'update3'} RDP-Parser",0x40010) if $confirm; }
+
+}  #--- End updateTool
+
+#--------------------------#
+sub chEnableLogging_Click
+#--------------------------#
+{
+  # Save the choice
+  if ($winConfig->chEnableLogging->Checked()) {
+    $CONFIG{'ENABLE_LOGGING'} = 1;
+    &saveConfig(\%CONFIG);
+    # Enable options
+    $winConfig->rbUseDefaultDir->Show();
+    $winConfig->rbLoggingDir->Show();
+    $winConfig->tfLoggingDir->Show();
+    $winConfig->btnLoggingDir->Show();
+  } else {
+    $CONFIG{'ENABLE_LOGGING'} = 0;
+    &saveConfig(\%CONFIG);
+    # Disable options
+    $winConfig->rbUseDefaultDir->Hide();
+    $winConfig->rbLoggingDir->Hide();
+    $winConfig->tfLoggingDir->Hide();
+    $winConfig->btnLoggingDir->Hide();
+  }
+
+}  #--- End chEnableLogging_Click
+
+#--------------------------#
+sub btnOpenLog_Click
+#--------------------------#
+{
+  # Local variables
+  my $logFile;
+  my $loggingDir = $winConfig->tfLoggingDir->Text();
+  if ($winConfig->rbLoggingDir->Checked() and $loggingDir and -d $loggingDir) {
+    $logFile = $loggingDir;
+  } else { $logFile = $USERDIR; }
+  $logFile .= '\RDP-Parser.log';
+  # Open file with default program
+  if ($logFile and -T $logFile) {
+    $win->ShellExecute('open', $logFile,'','',1) or
+    Win32::GUI::MessageBox($win, "$STR{'errorOpening'}: ".Win32::FormatMessage(Win32::GetLastError()), $STR{'error'}, 0x40010);
+  }
+  return(1);
+
+}  #--- End btnOpenLog_Click
+
+#--------------------------#
+sub rbUseDefaultDir_Click
+#--------------------------#
+{
+  # Save the choice
+  $CONFIG{'LOG_USE_DEFAULT_DIR'} = 1;
+  &saveConfig(\%CONFIG);
+  $winConfig->tfLoggingDir->Disable();
+  $winConfig->btnLoggingDir->Disable();
+
+}  #--- End rbUseDefaultDir_Click
+
+#--------------------------#
+sub rbLoggingDir_Click
+#--------------------------#
+{
+  # Save the choice
+  $CONFIG{'LOG_USE_DEFAULT_DIR'} = 0;
+  &saveConfig(\%CONFIG);
+  $winConfig->tfLoggingDir->Enable();
+  $winConfig->btnLoggingDir->Enable();
+
+}  #--- End rbLoggingDir_Click
+
+#--------------------------#
+sub tfLoggingDir_Change
+#--------------------------#
+{
+  # Local variables
+  my $loggingDir = $winConfig->tfLoggingDir->Text();
+  # Remember
+  if ($loggingDir and -d $loggingDir) {
+    $CONFIG{'LOGGING_DIR'} = $loggingDir;
+    &saveConfig(\%CONFIG);
+  } else { # Invalid file or no file
+    delete($CONFIG{'LOGGING_DIR'});
+    &saveConfig(\%CONFIG);
+    if ($loggingDir) {
+      $win->tfLoggingDir->Text('');
+      Win32::GUI::MessageBox($winConfig, $STR{'errNoValidFile'}, $STR{'Error'}, 0x40010) if $START;
+    }
+  }
+
+}  #--- End tfLoggingDir_Change
+
+#--------------------------#
+sub btnLoggingDir_Click
+#--------------------------#
+{
+  # Local variables
+  my $lastDir = $winConfig->tfLoggingDir->Text();
+  my $dir;
+  # Show BrowseForFolder dialog window
+  if ($lastDir) {
+    my(@parts) = split(/\\/, $lastDir);
+    if (pop(@parts) =~ /\./) { while ($lastDir =~ /[^\\]$/) { chop($lastDir); } }
+    $dir = Win32::GUI::BrowseForFolder( -owner => $winConfig, -title => $STR{'selDir'}.':', -folderonly => 1, -newui => 1, -directory => $lastDir);
+  } else {
+    $dir = Win32::GUI::BrowseForFolder( -owner => $winConfig, -title => $STR{'selDir'}.':', -folderonly => 1, -newui => 1);
+  }
+  # Selected folder
+  if ($dir and -d $dir) {
+    chop($dir) if $dir =~ /\\$/;
+    $winConfig->tfLoggingDir->Text($dir);
+  }
+  return(1);
+  
+}  #--- End btnLoggingDir_Click
+
+#--------------------------#
+sub saveConfig
+#--------------------------#
+{
+  # Local variables
+  my $refConfig = shift;
+  # Save configuration hash values
+  open(CONFIG,">$CONFIG_FILE");
+  flock(CONFIG, 2);
+  foreach my $cle (keys %{$refConfig}) { print CONFIG "$cle = $$refConfig{$cle}\n"; }
+  close(CONFIG);
+
+}  #--- End saveConfig
+
+#--------------------------#
+sub loadConfig
+#--------------------------#
+{
+  # Local variables
+  my $refConfig = shift;
+  # Open and load config values
+  if (-e $CONFIG_FILE) {
+    open(CONFIG, $CONFIG_FILE);
+    my @tab = <CONFIG>;
+    close(CONFIG);
+    foreach (@tab) {
+      chomp($_);
+      my ($key, $value) = split(/ = /, $_);
+      $$refConfig{$key} = $value if $key;
+    }
+  } else { # Create one
+    open(CONFIG, ">$CONFIG_FILE");
+    close(CONFIG);
+  }
+  # General tab
+  if (exists($$refConfig{'TOOL_AUTO_UPDATE'})) { $winConfig->chAutoUpdate->Checked($$refConfig{'TOOL_AUTO_UPDATE'});  }
+  else                                         { $winConfig->chAutoUpdate->Checked(1);                                } # Default is checked
+  # Logging
+  if (exists($$refConfig{'ENABLE_LOGGING'}))   { $winConfig->chEnableLogging->Checked($$refConfig{'ENABLE_LOGGING'});     }
+  else                                         { $winConfig->chEnableLogging->Checked(1);                                 } # Default is checked
+  if (exists($$refConfig{'LOGGING_DIR'}) and -d $$refConfig{'LOGGING_DIR'}) { # Use defined logging dir
+    $winConfig->tfLoggingDir->Text($$refConfig{'LOGGING_DIR'});
+    $winConfig->rbLoggingDir->Checked(1);
+    $winConfig->rbUseDefaultDir->Checked(0);
+    $winConfig->tfLoggingDir->Enable();
+    $winConfig->btnLoggingDir->Enable();
+		$DEBUG_FILE = $$refConfig{'LOGGING_DIR'};
+  } else {                                                                    # Use default dir
+    $winConfig->rbUseDefaultDir->Checked(1);
+    $winConfig->rbLoggingDir->Checked(0);
+    $winConfig->tfLoggingDir->Disable();
+    $winConfig->btnLoggingDir->Disable();
+  }
+  # Folder for report
+  if (exists($$refConfig{'DIR_REPORT'}) and
+      -d $$refConfig{'DIR_REPORT'})            { $win->tfReportDir->Text($$refConfig{'DIR_REPORT'});                  }
+  else { # Default dir
+    mkdir("$USERDIR\\Reports") if !-d "$USERDIR\\Reports";
+    $win->tfReportDir->Text("$USERDIR\\Reports");
+    $$refConfig{'DIR_REPORT'} = "$USERDIR\\Reports";
+  }
+  if (exists($$refConfig{'FORMAT_REPORT'})) {
+		$win->cbReportFormat->SetCurSel($$refConfig{'FORMAT_REPORT'});
+		if ($$refConfig{'FORMAT_REPORT'} == 1) { # Format is TXT
+			$win->chReportAddStats->Checked(0);
+			$win->chReportAddStats->Disable();
+		}
+	} else { # Default is XLSX
+		$win->cbReportFormat->SetCurSel(0);
+		$win->chReportAddStats->Enable();
+		$win->chReportAddStats->Checked(1) if !exists($$refConfig{'REPORT_ADD_STATS'}) or $$refConfig{'REPORT_ADD_STATS'};
+	} 
+	# Columns
+	$winCols->lvCols->ItemCheck( 0, 1);
+	$winCols->lvCols->ItemCheck( 1, 1);
+	$winCols->lvCols->ItemCheck( 2, 1);
+	$winCols->lvCols->ItemCheck( 3, 1);
+	$winCols->lvCols->ItemCheck( 4, 1);
+	$winCols->lvCols->ItemCheck( 5, 1);
+	$winCols->lvCols->ItemCheck( 6, 1);
+	$winCols->lvCols->ItemCheck( 7, 1);
+	$winCols->lvCols->ItemCheck( 8, 1);
+  if (exists($$refConfig{'REPORT_IP_ONLY'})    ) { $win->chReportIPsOnly->Checked($$refConfig{'REPORT_IP_ONLY'});        }
+  else                                           { $win->chReportIPsOnly->Checked(1);                                    } # Default is checked
+  if (exists($$refConfig{'REPORT_DATA_INLINE'})) { $win->chReportDataInline->Checked($$refConfig{'REPORT_DATA_INLINE'}); }
+  else                                           { $win->chReportDataInline->Checked(1);                                 } # Default is checked
+	# Timezone
+  if (exists($$refConfig{'OUTPUT_TIMEZONE'})   ) { $win->cbOutputTZ->SetCurSel($$refConfig{'OUTPUT_TIMEZONE'}); }
+  else { # Try to find local timezone, if not found, set to America/New_York
+    my $index = 0;
+    my $localTZ;
+    eval     { $localTZ = DateTime::TimeZone->new(name => 'local'); };
+    if (!$@) { $index   = $win->cbOutputTZ->FindStringExact($localTZ->{name}); }
+		else     { $index   = 107; } # Default is America/New_York
+    $win->cbOutputTZ->SetCurSel($index);
+    $$refConfig{'OUTPUT_TIMEZONE'} = $index;
+  }
+	# Others
+  if (exists($$refConfig{'REPORT_ADD_STATS'})  ) { $win->chReportAddStats->Checked($$refConfig{'REPORT_ADD_STATS'}); }
+  else                                           { $win->chReportAddStats->Checked(1);                               } # Default is checked
+  if (exists($$refConfig{'AUTO_OPEN_REPORT'})  ) { $win->chReportOpen->Checked($$refConfig{'AUTO_OPEN_REPORT'});     }
+  else                                           { $win->chReportOpen->Checked(1);                                   } # Default is checked
+  &saveConfig($refConfig);
+
+}  #--- End loadConfig
+
+#--------------------------#
+sub debug
+#--------------------------#
+{
+  # Local variables
+  my ($refMsg) = @_;
+  my $dateStr = &date(time);
+  # Save error msg in debug log file
+	my $fhLog;
+  if (-e $DEBUG_FILE) { open($fhLog,">>$DEBUG_FILE"); }
+  else                { open($fhLog,">$DEBUG_FILE");  }
+  flock($fhLog, 2);
+  print $fhLog "$dateStr\t$refMsg\n";
+  close($fhLog);  
+
+}  #--- End debug
+
+#--------------------------#
+sub date
+#--------------------------#
+{
+  # Conversion
+  my $time = shift;
+	if ($time) {
+		my ($s,$min,$hr,$j,$m,$an,$jour_s,$ha,$isDST) = localtime($time);
+		return(sprintf("%04d\-%02d\-%02d %02d:%02d:%02d", $an+1900, $m+1, $j, $hr, $min, $s));
+	}
+
+}  #--- End date
+
+#--------------------------#
+sub dateTZ
+#--------------------------#
+{
+  my $time = shift;
+  $time    = time if !$time;
+  my $currDateTime = DateTime->from_epoch(epoch => $time);
+  $currDateTime->set_time_zone($win->cbOutputTZ->GetString($win->cbOutputTZ->GetCurSel()));
+  return($currDateTime->strftime('%F %T %z'));
+
+}  #--- End dateTZ
