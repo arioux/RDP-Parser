@@ -2,7 +2,7 @@ RDP-Parser
 Description : RDP-Parser extracts RDP activities from Microsoft Windows Event Logs.
 Author		: Alain Rioux (admin@le-tools.com)
 WebSite		: http://le-tools.com/RDP-Parser.html
-SourceForge	: https://sourceforge.net/p/RDP-Parser
+SourceForge	: https://sourceforge.net/p/rdp-parser
 GitHub		: https://github.com/arioux/RDP-Parser
 
 
